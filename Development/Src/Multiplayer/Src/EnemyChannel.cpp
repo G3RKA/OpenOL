@@ -375,6 +375,49 @@ void UEnemyChannel::SendEnemyDoorBreak(AOLEnemyPawn* Enemy, AOLDoor* D, UBOOL bR
 }
 
 // ============================================================================
+// One owner per enemy
+//
+// Every client runs the AI copy of each map-placed enemy and announces it, and every client turns an announcement into a puppet, so two
+// copies of one enemy stood in the same place. When two copies of one enemy meet (same class, within ENEMY_MERGE_RADIUS), the copy of the
+// client with the LOWER player id stays real; the other client destroys its own copy and keeps the puppet.
+// Two copies of different enemies that stand closer than the radius are merged by mistake; enemies that exist on one client only are untouched.
+// (Equivalent to the binary patch of OLGame.exe in tools/outlast-coop; not compiled by the author of this change.)
+// ============================================================================
+
+static const FLOAT ENEMY_MERGE_RADIUS_SQ = 150.f * 150.f;
+
+static UBOOL IsEnemyAlive(const AOLEnemyPawn* E)
+{
+    return E && E->Health > 0 && !E->bDeleteMe && !E->bPendingDelete;
+}
+
+static UBOOL IsSameEnemyPlace(const AOLEnemyPawn* A, const AOLEnemyPawn* B)
+{
+    return A->GetClass() == B->GetClass() && (A->Location - B->Location).SizeSquared() < ENEMY_MERGE_RADIUS_SQ;
+}
+
+// Called before one of our own enemies is announced. Returns FALSE when E was a duplicate of a lower id's enemy and has been destroyed.
+static UBOOL KeepOwnEnemy(AMultiplayerController* Ctrl, AOLEnemyPawn* E)
+{
+    for (INT j = 0; j < Ctrl->RemoteEnemies.Num(); j++)
+    {
+        FRemoteEnemyState& RS = Ctrl->RemoteEnemies(j);
+        AOLEnemyPawn* Puppet = RS.DummyEnemy;
+        if (!Puppet || !IsSameEnemyPlace(Puppet, E))
+            continue;
+        if (RS.OwnerID < GMpConn.LocalPlayerID)
+        {
+            GWorld->DestroyActor(E);          // a lower id owns this enemy: ours is the duplicate, announce nothing
+            return FALSE;
+        }
+        RS.DummyEnemy = NULL;
+        GWorld->DestroyActor(Puppet);         // a higher id's puppet: ours is the real one
+        break;
+    }
+    return TRUE;
+}
+
+// ============================================================================
 // TickSend — called every game tick while connected
 // ============================================================================
 
@@ -393,6 +436,8 @@ void UEnemyChannel::TickSend(FLOAT DeltaTime)
         if (E->Health > 0 && !E->bDeleteMe && !E->bPendingDelete)
         {
             ControllerOwner->LastEnemyAlive(i) = TRUE;
+            if (!KeepOwnEnemy(ControllerOwner, E))
+                continue;
             SendSpawn(E);
 
             // Gather bot look-at data and state flags
@@ -540,6 +585,27 @@ static void ApplySpawn(UEnemyChannel* Ch, INT SenderID,
     S.TargetRot  = NewRot;
     S.TargetVel  = FVector(0.f, 0.f, 0.f);
     Ctrl->RemoteEnemies.AddItem(S);
+
+    // One owner per enemy: is one of our own enemies the other copy of this one?
+    if (NetEnemy)
+    {
+        for (INT i = 0; i < Ctrl->CachedEnemies.Num(); i++)
+        {
+            AOLEnemyPawn* Own = Ctrl->CachedEnemies(i);
+            if (!Own || Own == NetEnemy || !IsEnemyAlive(Own) || !IsSameEnemyPlace(Own, NetEnemy))
+                continue;
+            if (SenderID > GMpConn.LocalPlayerID)
+            {
+                Ctrl->RemoteEnemies(Ctrl->RemoteEnemies.Num() - 1).DummyEnemy = NULL;
+                GWorld->DestroyActor(NetEnemy);   // ours is the real one: no puppet of the sender's copy
+            }
+            else
+            {
+                GWorld->DestroyActor(Own);        // the sender's is the real one: drop our copy, keep the puppet
+            }
+            break;
+        }
+    }
 }
 
 static void ApplyDel(UEnemyChannel* Ch, INT SenderID, const FString& EnemyName)

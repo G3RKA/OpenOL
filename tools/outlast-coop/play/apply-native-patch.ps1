@@ -77,7 +77,9 @@ $payload  = New-Object System.Collections.Generic.List[byte]
 $payload.AddRange($code)
 $chars = [uint32]0x60000020                            # CODE | EXECUTE | READ
 if ($dataSize -gt 0) {                                 # a section that also carries mutable state: pad the code to a page, then the zeroed data
-    while ($payload.Count -lt (Align $code.Length 0x1000)) { $payload.Add(0) }
+    $dataOff = [Convert]::ToInt32($j.section.data_offset, 16)
+    if ($code.Length -gt $dataOff) { throw "the code ($($code.Length) bytes) overlaps the data area at 0x$('{0:x}' -f $dataOff)" }
+    while ($payload.Count -lt $dataOff) { $payload.Add(0) }
     for ($k = 0; $k -lt $dataSize; $k++) { $payload.Add(0) }
     $chars = [Convert]::ToUInt32("E0000060", 16)        # code + initialized data + execute + read + write
 }

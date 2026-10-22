@@ -1,11 +1,46 @@
 {
   "input_sha256": "2e58afbb1203d04476581f34216428d1dfc96228e5f3df8c6881323c56c93346",
-  "output_sha256": "6ee34bd030353dcfc17b3b107b50685e36ccc0e20c57cdf361b0280c54fd89cd",
-  "section": { "name": ".olfix", "cave_rva": "0x39AF000", "data_size": 0 },
+  "output_sha256": "d6268f491cf33a440bcd8661755740c1a3188dbead5f556ac966d3a165b81375",
+  "section": {
+    "name": ".olfix",
+    "cave_rva": "0x39AF000",
+    "data_size": 4096,
+    "data_offset": "0x1000"
+  },
   "sites": [
-    { "name": "apply_spawn", "kind": "call32",  "rva": "0x172B0B4", "expect": "e8473affff",   "symbol": "my_ApplySpawn",
-      "note": "direct call of the static ApplySpawn in UEnemyChannel::OnBinaryPacket" },
-    { "name": "send_spawn",  "kind": "call_vt6", "rva": "0x1736CAB", "expect": "ff9068020000", "symbol": "my_SendSpawn",
-      "note": "call [rax+0x268] = vtable SendSpawn inside UEnemyChannel::TickSend" }
-  ]
+    {
+      "name": "apply_spawn",
+      "kind": "call32",
+      "rva": "0x172B0B4",
+      "expect": "e8473affff",
+      "symbol": "my_ApplySpawn",
+      "note": "direct call of the static ApplySpawn in UEnemyChannel::OnBinaryPacket"
+    },
+    {
+      "name": "send_spawn",
+      "kind": "call_vt6",
+      "rva": "0x1736CAB",
+      "expect": "ff9068020000",
+      "symbol": "my_SendSpawn",
+      "note": "call [rax+0x268] = vtable SendSpawn inside UEnemyChannel::TickSend"
+    }
+  ],
+  "layout": {
+    "magic": 0,
+    "version": 4,
+    "disable": 8,
+    "cnt_apply_calls": 16,
+    "cnt_send_calls": 20,
+    "cnt_own_destroyed": 24,
+    "cnt_puppet_destroyed": 28
+  },
+  "layout_doc": {
+    "magic": "u32 0x5846504F ('OFPX' little endian) set by the first hook that runs; 0 means no hook has run yet",
+    "version": "u32, 2 for this layout",
+    "disable": "u32 bit mask, a SET bit switches a feature off at run time (the twin switch of a test); bit 0 = one-owner enemy rule",
+    "cnt_apply_calls": "u32 calls of the ApplySpawn hook",
+    "cnt_send_calls": "u32 calls of the SendSpawn hook",
+    "cnt_own_destroyed": "u32 times our own enemy was destroyed as a duplicate",
+    "cnt_puppet_destroyed": "u32 times a puppet was destroyed as a duplicate"
+  }
 }

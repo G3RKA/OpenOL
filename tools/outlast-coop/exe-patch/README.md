@@ -47,3 +47,10 @@ standing closer than 150 units to each other, three players, two PCs.
 - `build.py` compiles `olfix.c` and writes `olfix.json` (code, entry offsets and the table). `apply_patch.py` and `play/apply-native-patch.ps1` both read only `olfix.json`.
 - `selftest.py <original OLGame.exe>` is a static test with no game: reference hash, only the allowed bytes changed, every site decodes to its entry, characteristics, and three
   refusals. The two appliers produce identical bytes (checked for the plain section and for the section with a data area).
+
+## Data area, kill switch and counters (patch v2)
+
+The section also carries a zeroed, writable data area (`sites.json` `layout`): a kill switch per feature (bit 0 = the one-owner rule, a SET bit switches it off) and counters (hook calls,
+own enemies destroyed as duplicates, puppets destroyed). `harness/olmail.py` reads and sets them from outside with `ReadProcessMemory` and `WriteProcessMemory` on the game's
+own process, so a test switches the rule off and on **inside one run** instead of swapping the exe: `harness/twin_live.py` does it (rule on: one enemy in total, the merge counters
+move; rule off: every client has its own copy and a puppet, the original bug). Measured 2026-10-22: rule on `own [1, 0] puppets [0, 1]`, rule off `own [1, 1] puppets [1, 1]`.

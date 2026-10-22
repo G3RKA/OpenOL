@@ -2,7 +2,7 @@
 
   python -I census.py <pid> [<pid> ...]
 
-Uses the structure of OpenOL 2.1.0's AMultiplayerController (offsets from the decompiled OLGame.exe, see exe-patch):
+Uses the structure of OpenOL 2.1.0's AMultiplayerController (offsets from the decompiled OLGame.exe, see patches/native-one-owner):
   GMultiplayerController   image base + 0x36b6908
   CachedEnemies            ctrl + 0xe78 (data), + 0xe80 (count)          the client's OWN enemies (real AI copies)
   RemoteEnemies            ctrl + 0xeb8 (data), + 0xec0 (count), 0x44 each: DummyEnemy +0x10, OwnerID +0x18   puppets of other clients' enemies
@@ -20,14 +20,16 @@ ps = ctypes.WinDLL("psapi", use_last_error=True)
 k32.OpenProcess.restype = w.HANDLE
 k32.OpenProcess.argtypes = [w.DWORD, w.BOOL, w.DWORD]
 k32.ReadProcessMemory.argtypes = [w.HANDLE, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)]
+k32.WriteProcessMemory.argtypes = [w.HANDLE, ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)]
 ps.EnumProcessModules.argtypes = [w.HANDLE, ctypes.POINTER(ctypes.c_void_p), w.DWORD, ctypes.POINTER(w.DWORD)]
 
 RVA_CTRL = 0x36B6908
 
 
 class Proc:
-    def __init__(self, pid):
-        self.h = k32.OpenProcess(0x0010 | 0x0400, False, pid)   # VM_READ | QUERY_INFORMATION
+    def __init__(self, pid, write=False):
+        # VM_READ | QUERY_INFORMATION; write=True adds VM_WRITE | VM_OPERATION (only for the data area of our own patch, see olmail.py)
+        self.h = k32.OpenProcess(0x0010 | 0x0400 | (0x0020 | 0x0008 if write else 0), False, pid)
         if not self.h:
             raise OSError(f"cannot open pid {pid}")
         mods = (ctypes.c_void_p * 1)()
@@ -42,6 +44,10 @@ class Proc:
         if not k32.ReadProcessMemory(self.h, ctypes.c_void_p(addr), buf, n, ctypes.byref(got)) or got.value != n:
             return None
         return buf.raw
+
+    def wr(self, addr, data):
+        n = ctypes.c_size_t()
+        return bool(k32.WriteProcessMemory(self.h, ctypes.c_void_p(addr), data, len(data), ctypes.byref(n))) and n.value == len(data)
 
     def u64(self, a):
         b = self.rd(a, 8)

@@ -54,3 +54,10 @@ The section also carries a zeroed, writable data area (`sites.json` `layout`): a
 own enemies destroyed as duplicates, puppets destroyed). `harness/olmail.py` reads and sets them from outside with `ReadProcessMemory` and `WriteProcessMemory` on the game's
 own process, so a test switches the rule off and on **inside one run** instead of swapping the exe: `harness/twin_live.py` does it (rule on: one enemy in total, the merge counters
 move; rule off: every client has its own copy and a puppet, the original bug). Measured 2026-10-22: rule on `own [1, 0] puppets [0, 1]`, rule off `own [1, 1] puppets [1, 1]`.
+
+## Command mailbox (patch v3)
+
+A per-frame hook (`AOLPlayerController::Tick`, the vtable slot +0x350 of the OLPlayerController and MultiplayerController tables, both covered by base relocations) runs commands that a test
+writes into the data area: `LOAD_CHECKPOINT name [persistent level]` calls the overlay's own loader (`ExecCP`) from the game thread, outside the network poll. `harness/olmail.py <pid> load <name>` sends it;
+`harness/mailbox_live.py` checks it with two clients and **no mouse and no keyboard**: both heroes moved from (3702, 4291) to the survey position of `Prison_IsolationCells01_Mid` (1979, 3481), the mailbox
+answered in 0.05 s. The same-world case needs no persistent level name; a jump to another map needs it (not yet mapped).

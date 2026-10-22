@@ -50,6 +50,9 @@ def main():
             ok = got == want
         check(f"site-{s['name']}-reaches-{s['symbol']}", ok, f"{rva:#x} -> {got:#x} (entry at {want:#x})")
 
+    rel = po.reloc_rvas()
+    slots = [int(s["rva"], 16) for s in cfg["sites"] if s["kind"] == "vtable_slot"]
+    check("vtable-slots-have-a-base-relocation", all(r in rel for r in slots), f"{len(slots)} slots, {sum(r in rel for r in slots)} covered of {len(rel)} DIR64 entries")
     code = bytes.fromhex(cfg["hex"])
     check("code-landed-intact", pn.read(cave, len(code)) == code)
     want_ch = apply_patch.RWX_CODE_DATA if cfg["section"].get("data_size", 0) else pe.IMAGE_SCN_CNT_CODE | pe.IMAGE_SCN_MEM_EXECUTE | pe.IMAGE_SCN_MEM_READ

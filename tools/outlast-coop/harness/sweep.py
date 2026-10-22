@@ -33,8 +33,8 @@ def names_of(group):
 
 
 def alive_pid(pid):
-    out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}"], capture_output=True, text=True).stdout
-    return "OLGame" in out
+    out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}"], capture_output=True).stdout      # bytes: the console code page is not UTF-8
+    return b"OLGame" in out
 
 
 def log_marker(c):

@@ -1,6 +1,6 @@
 {
   "input_sha256": "2e58afbb1203d04476581f34216428d1dfc96228e5f3df8c6881323c56c93346",
-  "output_sha256": "d6268f491cf33a440bcd8661755740c1a3188dbead5f556ac966d3a165b81375",
+  "output_sha256": "3d118573fae072949c1022c35a382e596fc7278318e536f1ba9b5a7f0f5598b1",
   "section": {
     "name": ".olfix",
     "cave_rva": "0x39AF000",
@@ -23,6 +23,22 @@
       "expect": "ff9068020000",
       "symbol": "my_SendSpawn",
       "note": "call [rax+0x268] = vtable SendSpawn inside UEnemyChannel::TickSend"
+    },
+    {
+      "name": "tick_olpc",
+      "kind": "vtable_slot",
+      "rva": "0x2980BA0",
+      "expect": "d0f1744101000000",
+      "symbol": "my_Tick",
+      "note": "slot +0x350 (AOLPlayerController::Tick, 0x174f1d0) of the OLPlayerController / MultiplayerController vtable: the per-frame game-thread hook"
+    },
+    {
+      "name": "tick_mpc",
+      "kind": "vtable_slot",
+      "rva": "0x2981FD0",
+      "expect": "d0f1744101000000",
+      "symbol": "my_Tick",
+      "note": "slot +0x350 (AOLPlayerController::Tick, 0x174f1d0) of the OLPlayerController / MultiplayerController vtable: the per-frame game-thread hook"
     }
   ],
   "layout": {
@@ -32,15 +48,27 @@
     "cnt_apply_calls": 16,
     "cnt_send_calls": 20,
     "cnt_own_destroyed": 24,
-    "cnt_puppet_destroyed": 28
+    "cnt_puppet_destroyed": 28,
+    "cmd_seq": 64,
+    "cmd": 68,
+    "cmd_arg_len": 72,
+    "res_seq": 76,
+    "res_code": 80,
+    "cmd_arg": 128
   },
   "layout_doc": {
     "magic": "u32 0x5846504F ('OFPX' little endian) set by the first hook that runs; 0 means no hook has run yet",
     "version": "u32, 2 for this layout",
-    "disable": "u32 bit mask, a SET bit switches a feature off at run time (the twin switch of a test); bit 0 = one-owner enemy rule",
+    "disable": "u32 bit mask, a SET bit switches a feature off at run time (the twin switch of a test); bit 0 = one-owner enemy rule, bit 1 = command mailbox",
     "cnt_apply_calls": "u32 calls of the ApplySpawn hook",
     "cnt_send_calls": "u32 calls of the SendSpawn hook",
     "cnt_own_destroyed": "u32 times our own enemy was destroyed as a duplicate",
-    "cnt_puppet_destroyed": "u32 times a puppet was destroyed as a duplicate"
+    "cnt_puppet_destroyed": "u32 times a puppet was destroyed as a duplicate",
+    "cmd_seq": "u32 command mailbox, test -> game: the test writes cmd, cmd_arg_len and cmd_arg first and cmd_seq LAST (res_seq + 1); the per-frame hook runs the command when cmd_seq != res_seq",
+    "cmd": "u32 1 = LOAD_CHECKPOINT (cmd_arg = name NUL persistent-level-name NUL, ASCII, each at most 127 bytes; the persistent name may be empty)",
+    "cmd_arg_len": "u32 bytes of cmd_arg in use",
+    "res_seq": "u32 game -> test: set to cmd_seq when the command has been handled",
+    "res_code": "i32 0 = started, 2 = unknown command, 3 = bad argument",
+    "cmd_arg": "256 bytes"
   }
 }

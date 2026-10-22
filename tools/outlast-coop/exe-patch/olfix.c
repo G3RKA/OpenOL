@@ -35,6 +35,7 @@ static inline char *IB(void)
 /* The data area (a zeroed, writable part of the same section): a kill switch per feature that a test can set from outside, and counters it can read. */
 #define OLFX_MAGIC 0x5846504Fu
 #define DISABLE_ONE_OWNER 1u
+#define DISABLE_MAILBOX   2u
 static inline volatile u32 *data_area(char *ib)
 {
     volatile u32 *d = (volatile u32 *)(ib + CAVE_RVA + DATA_OFFSET);
@@ -49,6 +50,10 @@ static inline void bump(volatile u32 *d, u32 field)
     d[field / 4] = d[field / 4] + 1;
 }
 
+#define RVA_TICK          0x174f1d0   /* UBOOL AOLPlayerController::Tick(FLOAT dt, ELevelTick) : the per-frame game-thread hook (vtable slot +0x350) */
+#define RVA_EXECCP        0x1707020   /* the overlay's checkpoint loader ExecCP_GameThread(void): reads the two buffers below, loads in this world or changes the map */
+#define RVA_CPNAME        0x3677fd0   /* char[128] GCPPendingName */
+#define RVA_CPPERSIST     0x3678050   /* char[128] GCPPendingPersist */
 #define RVA_APPLYSPAWN    0x171eb00   /* static void ApplySpawn(UEnemyChannel*, INT sender, FString& name, FString& class, FLOAT x,y,z, INT yaw, ...) */
 #define RVA_DESTROYACTOR  0x08d7550   /* UBOOL UWorld::DestroyActor(AActor*, UBOOL bNetForce, UBOOL bShouldModifyLevel) */
 #define RVA_GWORLD        0x30d1e58   /* UWorld* GWorld */
@@ -164,4 +169,47 @@ void my_SendSpawn(char *ch, char *e)
     /* the original SendSpawn, found through the vtable the patched call site no longer reads */
     char *vt = *(char **)ch;
     (*(SendSpawnFn *)(vt + 0x268))(ch, e);
+}
+
+typedef i32 (*TickFn)(char *, float, i32);
+
+static void copy_cstr(char *dst, const volatile char *src, u32 max)
+{
+    u32 i = 0;
+    for (; i + 1 < max && src[i]; i++)
+        dst[i] = src[i];
+    dst[i] = 0;
+}
+
+/* The command mailbox: a test writes a command into the data area from outside, this hook (game thread, once per frame, outside the network poll) runs it. */
+__attribute__((noinline, used))
+i32 my_Tick(char *pc, float dt, i32 type)
+{
+    char *ib = IB();
+    volatile u32 *d = data_area(ib);
+    u32 seq = d[F_CMD_SEQ / 4];
+    if (seq != d[F_RES_SEQ / 4] && !(d[F_DISABLE / 4] & DISABLE_MAILBOX)) {
+        i32 code = 2;
+        if (d[F_CMD / 4] == 1) {                                         /* LOAD_CHECKPOINT: name NUL persistent NUL */
+            volatile char *arg = (volatile char *)(d + F_CMD_ARG / 4);
+            u32 len = d[F_CMD_ARG_LEN / 4], n = 0;
+            while (n < len && n < 255 && arg[n])
+                n++;
+            if (n == 0 || n >= 128 || n >= len) {
+                code = 3;
+            } else {
+                copy_cstr(ib + RVA_CPNAME, arg, 128);
+                copy_cstr(ib + RVA_CPPERSIST, arg + n + 1, 128);
+                d[F_RES_CODE / 4] = 0;
+                d[F_RES_SEQ / 4] = seq;                                  /* answer before the call: the load may replace the world */
+                ((void (*)(void))(ib + RVA_EXECCP))();
+                code = -1;
+            }
+        }
+        if (code >= 0) {
+            d[F_RES_CODE / 4] = (u32)code;
+            d[F_RES_SEQ / 4] = seq;
+        }
+    }
+    return ((TickFn)(ib + RVA_TICK))(pc, dt, type);
 }

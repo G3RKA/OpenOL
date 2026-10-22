@@ -2,6 +2,7 @@
 
   python -I olmail.py <pid> [<pid> ...]                 print the data area of each client
   python -I olmail.py <pid> disable one_owner|none      set or clear the one-owner kill switch (a twin without swapping exes)
+  python -I olmail.py <pid> load <checkpoint> [<persistent level>]   load a checkpoint through the patch's mailbox (no mouse, no overlay)
 
 The area is part of the patched exe's own section (writable); only these few u32 fields are ever written, from outside, by this tool.
 """
@@ -23,7 +24,7 @@ MAGIC = 0x5846504F
 
 def read(pid):
     p = census.Proc(pid)
-    raw = p.rd(p.base + CAVE + OFF, 0x40)
+    raw = p.rd(p.base + CAVE + OFF, 0x100)
     if raw is None:
         return {"pid": pid, "error": "data area not readable (not the patched exe?)"}
     f = {k: struct.unpack_from("<I", raw, v)[0] for k, v in LAY.items()}
@@ -37,9 +38,38 @@ def set_disable(pid, mask):
     return p.wr(p.base + CAVE + OFF + LAY["disable"], struct.pack("<I", mask))
 
 
+def send_load(pid, name, persist="", timeout=15.0):
+    """Ask the patched game to load a checkpoint (the overlay's loader, run from a per-frame hook). Returns (res_code, seconds) or (None, seconds) on a timeout.
+    The test writes the argument first and cmd_seq last; the game answers by copying cmd_seq to res_seq."""
+    import time
+    p = census.Proc(pid, write=True)
+    base = p.base + CAVE + OFF
+    raw = p.rd(base, 0x100)
+    if raw is None:
+        raise OSError("data area not readable (not the patched exe?)")
+    res_seq = struct.unpack_from("<I", raw, LAY["res_seq"])[0]
+    arg = name.encode("ascii") + b"\x00" + persist.encode("ascii") + b"\x00"
+    if len(arg) > 255 or len(name) > 127 or len(persist) > 127:
+        raise ValueError("name or persistent level name too long")
+    ok = p.wr(base + LAY["cmd_arg"], arg + b"\x00") and p.wr(base + LAY["cmd_arg_len"], struct.pack("<I", len(arg))) and p.wr(base + LAY["cmd"], struct.pack("<I", 1))
+    if not ok:
+        raise OSError("write failed")
+    seq = (res_seq + 1) & 0xFFFFFFFF
+    t0 = time.time()
+    p.wr(base + LAY["cmd_seq"], struct.pack("<I", seq))
+    while time.time() - t0 < timeout:
+        r = p.rd(base + LAY["res_seq"], 8)
+        if r and struct.unpack_from("<I", r, 0)[0] == seq:
+            return struct.unpack_from("<i", r, 4)[0], time.time() - t0
+        time.sleep(0.05)
+    return None, time.time() - t0
+
+
 if __name__ == "__main__":
     a = sys.argv[1:]
-    if len(a) == 3 and a[1] == "disable":
+    if len(a) >= 3 and a[1] == "load":
+        print(send_load(int(a[0]), a[2], a[3] if len(a) > 3 else ""))
+    elif len(a) == 3 and a[1] == "disable":
         ok = set_disable(int(a[0]), {"one_owner": 1, "none": 0}[a[2]])
         print("written" if ok else "write failed")
     else:

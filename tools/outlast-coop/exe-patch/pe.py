@@ -77,6 +77,21 @@ class PE:
         struct.pack_into("<I", self.d, self.opt + 64, 0)
         return va
 
+    def reloc_rvas(self):
+        """RVAs covered by a base relocation of type DIR64 (the absolute 64-bit pointers the loader fixes when the image is not at its preferred base)."""
+        rva, size = struct.unpack_from("<II", self.d, self.opt + 112 + 5 * 8)
+        off, end, out = self.rva_to_off(rva), self.rva_to_off(rva) + size, set()
+        while off < end:
+            page, blk = struct.unpack_from("<II", self.d, off)
+            if blk < 8:
+                break
+            for i in range((blk - 8) // 2):
+                e = struct.unpack_from("<H", self.d, off + 8 + 2 * i)[0]
+                if e >> 12 == 10:
+                    out.add(page + (e & 0xFFF))
+            off += blk
+        return out
+
     def bytes(self):
         return bytes(self.d)
 

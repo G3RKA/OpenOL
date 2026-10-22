@@ -24,10 +24,10 @@ MAGIC = 0x5846504F
 
 def read(pid):
     p = census.Proc(pid)
-    raw = p.rd(p.base + CAVE + OFF, 0x100)
+    raw = p.rd(p.base + CAVE + OFF, int(CFG["section"]["data_size"]))
     if raw is None:
         return {"pid": pid, "error": "data area not readable (not the patched exe?)"}
-    f = {k: struct.unpack_from("<I", raw, v)[0] for k, v in LAY.items()}
+    f = {k: struct.unpack_from("<I", raw, v)[0] for k, v in LAY.items() if v + 4 <= len(raw)}
     f["pid"] = pid
     f["hooks_ran"] = f["magic"] == MAGIC
     return f

@@ -36,6 +36,7 @@ static inline char *IB(void)
 #define OLFX_MAGIC 0x5846504Fu
 #define DISABLE_ONE_OWNER 1u
 #define DISABLE_MAILBOX   2u
+#define DISABLE_SHARED_CP 4u
 static inline volatile u32 *data_area(char *ib)
 {
     volatile u32 *d = (volatile u32 *)(ib + CAVE_RVA + DATA_OFFSET);
@@ -54,6 +55,14 @@ static inline void bump(volatile u32 *d, u32 field)
 #define RVA_EXECCP        0x1707020   /* the overlay's checkpoint loader ExecCP_GameThread(void): reads the two buffers below, loads in this world or changes the map */
 #define RVA_CPNAME        0x3677fd0   /* char[128] GCPPendingName */
 #define RVA_CPPERSIST     0x3678050   /* char[128] GCPPendingPersist */
+#define RVA_SNGAC         0x174e830   /* void AOLPlayerController::StartNewGameAtCheckpoint(const FString& name, UBOOL bSave) (vtable +0xa88) */
+#define RVA_SENDBINARY    0x174d9b0   /* FMpConnection::SendBinary(FMpConnection*, const BYTE* data, INT count): the wire adds the player id after the type byte */
+#define RVA_GMPCONN       0x36b9a30   /* FMpConnection GMpConn: +0x30 bIsConnected, +0x34 bIsHandshaked */
+#define RVA_GETGAMEINFO   0x0d214c0   /* AGameInfo* UWorld::GetGameInfo(UWorld*) */
+#define GAME_DIFFICULTY   0x49c       /* AOLGame::DifficultyMode (BYTE, 3 = Insane: a death restarts through StartNewGameAtCheckpoint) */
+#define PC_HEROPAWN       0xa5c       /* AOLPlayerController::HeroPawn */
+#define CH_WORLD          5
+#define WORLD_CHECKPOINT_LOAD 0x11    /* new: [nameLen][name ASCII][persistLen][persistent level ASCII] */
 #define RVA_APPLYSPAWN    0x171eb00   /* static void ApplySpawn(UEnemyChannel*, INT sender, FString& name, FString& class, FLOAT x,y,z, INT yaw, ...) */
 #define RVA_DESTROYACTOR  0x08d7550   /* UBOOL UWorld::DestroyActor(AActor*, UBOOL bNetForce, UBOOL bShouldModifyLevel) */
 #define RVA_GWORLD        0x30d1e58   /* UWorld* GWorld */
@@ -63,6 +72,8 @@ static inline void bump(volatile u32 *d, u32 field)
 #define CH_CONTROLLER     0x60        /* UEnemyChannel::ControllerOwner */
 #define CTRL_CACHED       0xe78       /* AMultiplayerController::CachedEnemies  data ptr, count at +8 */
 #define CTRL_REMOTE       0xeb8       /* AMultiplayerController::RemoteEnemies  data ptr, count at +8, element size 0x44 */
+#define CTRL_SENT         0xec8       /* AMultiplayerController::SentEnemySpawns  TArray<FString> (16 bytes each: TCHAR*, num, max), count at +8 */
+#define RVA_APPFREE       0x0be940    /* appFree(void*) */
 #define REMOTE_STRIDE     0x44
 #define REMOTE_DUMMY      0x10        /* FRemoteEnemyState::DummyEnemy */
 #define REMOTE_OWNER      0x18        /* FRemoteEnemyState::OwnerID */
@@ -131,6 +142,7 @@ void my_ApplySpawn(char *ch, i32 sender, void *name, void *cls, float x, float y
             *(char **)(r + REMOTE_DUMMY) = 0;     /* ours is the real one: no puppet of the sender's copy */
             destroy_actor(ib, d);
             bump(d0, F_CNT_PUPPET_DESTROYED);
+            *(char *volatile *)((volatile char *)d0 + F_REBROADCAST_CTRL) = ctrl;   /* the sender may have missed our announcement while it loaded: announce again */
         } else {
             destroy_actor(ib, e);                 /* the sender's is the real one: drop our copy, keep the puppet */
             bump(d0, F_CNT_OWN_DESTROYED);
@@ -163,6 +175,7 @@ void my_SendSpawn(char *ch, char *e)
             *(char **)(r + REMOTE_DUMMY) = 0;
             destroy_actor(ib, d);            /* a higher id's puppet: ours is the real one */
             bump(d0, F_CNT_PUPPET_DESTROYED);
+            *(char *volatile *)((volatile char *)d0 + F_REBROADCAST_CTRL) = ctrl;   /* make sure the owner of that puppet hears of ours */
             break;
         }
     }
@@ -172,6 +185,36 @@ void my_SendSpawn(char *ch, char *e)
 }
 
 typedef i32 (*TickFn)(char *, float, i32);
+typedef void (*SNGACFn)(char *, void *, i32);
+typedef void (*WorldPacketFn)(char *, i32, u32, const u8 *, i32);
+
+static int same_name(const volatile char *a, const unsigned short *w, i32 wn)
+{
+    i32 i = 0;
+    for (; i < wn && w[i]; i++)
+        if (i >= 127 || a[i] != (char)w[i])
+            return 0;
+    return a[i] == 0;
+}
+
+/* the persistent level of a checkpoint, from the prefix table the applier wrote into the data area (no string constants in the code) */
+static const volatile char *persist_of(volatile u32 *d, const char *name)
+{
+    const volatile char *t = (const volatile char *)d + F_PERSIST_TABLE;
+    while (*t) {
+        const volatile char *pre = t, *per;
+        i32 k = 0;
+        while (pre[k] && name[k] == pre[k])
+            k++;
+        while (*t) t++;
+        per = ++t;
+        while (*t) t++;
+        t++;
+        if (pre[k] == 0)
+            return per;
+    }
+    return t;   /* the empty string: unknown group, same-world loads still work */
+}
 
 static void copy_cstr(char *dst, const volatile char *src, u32 max)
 {
@@ -187,6 +230,31 @@ i32 my_Tick(char *pc, float dt, i32 type)
 {
     char *ib = IB();
     volatile u32 *d = data_area(ib);
+    char *rb = *(char *volatile *)((volatile char *)d + F_REBROADCAST_CTRL);
+    if (rb) {                                                            /* announce all our enemies again: empty the 'already announced' list */
+        *(char *volatile *)((volatile char *)d + F_REBROADCAST_CTRL) = 0;
+        if (rb == pc) {                                                  /* only the controller that set it, and only from its own Tick */
+            char *items = *(char **)(rb + CTRL_SENT);
+            i32 n = *(i32 *)(rb + CTRL_SENT + 8);
+            for (i32 i = 0; items && i < n; i++) {
+                void *str = *(void **)(items + 16 * (long long)i);
+                if (str)
+                    ((void (*)(void *))(ib + RVA_APPFREE))(str);
+            }
+            *(i32 *)(rb + CTRL_SENT + 8) = 0;                            /* ArrayNum = 0: the next TickSend sends every live enemy again */
+            bump(d, F_CNT_REBROADCAST);
+        }
+    }
+    if (d[F_FOLLOW_PENDING / 4]) {                                       /* a partner loaded a checkpoint: do the same here */
+        d[F_FOLLOW_PENDING / 4] = 0;
+        if (!(d[F_DISABLE / 4] & DISABLE_SHARED_CP)) {
+            copy_cstr((char *)d + F_EXPECT_NAME, (const volatile char *)d + F_FOLLOW_NAME, 128);
+            copy_cstr(ib + RVA_CPNAME, (const volatile char *)d + F_FOLLOW_NAME, 128);
+            copy_cstr(ib + RVA_CPPERSIST, (const volatile char *)d + F_FOLLOW_PERSIST, 128);
+            bump(d, F_CNT_FOLLOW_EXEC);
+            ((void (*)(void))(ib + RVA_EXECCP))();
+        }
+    }
     u32 seq = d[F_CMD_SEQ / 4];
     if (seq != d[F_RES_SEQ / 4] && !(d[F_DISABLE / 4] & DISABLE_MAILBOX)) {
         i32 code = 2;
@@ -212,4 +280,79 @@ i32 my_Tick(char *pc, float dt, i32 type)
         }
     }
     return ((TickFn)(ib + RVA_TICK))(pc, dt, type);
+}
+
+/* Every checkpoint load passes here (menu, overlay, the mailbox, a deferred cross-map load, an Insane death restart). Tell the partners, unless it is a
+   death restart or the partner's own load we are executing (echo guard). */
+__attribute__((noinline, used))
+void my_SNGAC(char *pc, void *fname, i32 bsave)
+{
+    char *ib = IB();
+    volatile u32 *d = data_area(ib);
+    char *hero = pc ? *(char **)(pc + PC_HEROPAWN) : 0;
+    int dying = hero && *(i32 *)(hero + PAWN_HEALTH) <= 0;
+    ((SNGACFn)(ib + RVA_SNGAC))(pc, fname, bsave);
+    const unsigned short *w = fname ? *(const unsigned short **)fname : 0;
+    i32 wn = fname ? *(i32 *)((char *)fname + 8) : 0;
+    char *conn = ib + RVA_GMPCONN;
+    if (!w || wn <= 1 || (d[F_DISABLE / 4] & DISABLE_SHARED_CP) || !*(i32 *)(conn + 0x30) || !*(i32 *)(conn + 0x34))
+        return;
+    if (((volatile char *)d)[F_EXPECT_NAME]) {
+        int echo = same_name((const volatile char *)d + F_EXPECT_NAME, w, wn);
+        ((volatile char *)d)[F_EXPECT_NAME] = 0;
+        if (echo) {
+            bump(d, F_CNT_ECHO_SUPPRESSED);
+            return;
+        }
+    }
+    char *game = ((char *(*)(void *))(ib + RVA_GETGAMEINFO))(*(void **)(ib + RVA_GWORLD));
+    if (dying || (game && *(u8 *)(game + GAME_DIFFICULTY) == 3))
+        return;
+    char buf[2 + 1 + 127 + 1 + 127];
+    char name[128];
+    i32 n = 0;
+    for (; n < 127 && n < wn && w[n]; n++)
+        name[n] = (char)(w[n] < 128 ? w[n] : '?');
+    name[n] = 0;
+    const volatile char *per = persist_of(d, name);
+    i32 pn = 0;
+    while (pn < 127 && per[pn])
+        pn++;
+    i32 k = 0;
+    buf[k++] = CH_WORLD;
+    buf[k++] = WORLD_CHECKPOINT_LOAD;
+    buf[k++] = (char)n;
+    for (i32 i = 0; i < n; i++) buf[k++] = name[i];
+    buf[k++] = (char)pn;
+    for (i32 i = 0; i < pn; i++) buf[k++] = per[i];
+    ((void (*)(void *, const char *, i32))(ib + RVA_SENDBINARY))(conn, buf, k);
+    bump(d, F_CNT_FOLLOW_SENT);
+}
+
+/* The world packets: WORLD_CHECKPOINT_LOAD is new and handled here (stored, run by the next frame); everything else goes to the original handler. */
+__attribute__((noinline, used))
+void my_WorldPacket(char *ch, i32 sender, u32 type, const u8 *data, i32 len)
+{
+    char *ib = IB();
+    volatile u32 *d = data_area(ib);
+    if ((type & 0xff) != WORLD_CHECKPOINT_LOAD) {
+        char *vt = *(char **)ch;
+        (*(WorldPacketFn *)(vt + 0x298))(ch, sender, type, data, len);
+        return;
+    }
+    bump(d, F_CNT_FOLLOW_RECV);
+    if (!data || len < 2 || (d[F_DISABLE / 4] & DISABLE_SHARED_CP))
+        return;
+    i32 n = data[0];
+    if (n == 0 || n > 127 || 1 + n + 1 > len)
+        return;
+    i32 pn = data[1 + n];
+    if (pn > 127 || 1 + n + 1 + pn > len)
+        return;
+    volatile char *fn = (volatile char *)d + F_FOLLOW_NAME, *fp = (volatile char *)d + F_FOLLOW_PERSIST;
+    for (i32 i = 0; i < n; i++) fn[i] = (char)data[1 + i];
+    fn[n] = 0;
+    for (i32 i = 0; i < pn; i++) fp[i] = (char)data[2 + n + i];
+    fp[pn] = 0;
+    d[F_FOLLOW_PENDING / 4] = 1;
 }

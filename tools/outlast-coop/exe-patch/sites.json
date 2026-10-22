@@ -1,6 +1,6 @@
 {
   "input_sha256": "2e58afbb1203d04476581f34216428d1dfc96228e5f3df8c6881323c56c93346",
-  "output_sha256": "3d118573fae072949c1022c35a382e596fc7278318e536f1ba9b5a7f0f5598b1",
+  "output_sha256": "c85b55777f3e8ae3e1a2f46f49902b7ca587f55809f4d911e2ce3988baa3d1a5",
   "section": {
     "name": ".olfix",
     "cave_rva": "0x39AF000",
@@ -39,6 +39,30 @@
       "expect": "d0f1744101000000",
       "symbol": "my_Tick",
       "note": "slot +0x350 (AOLPlayerController::Tick, 0x174f1d0) of the OLPlayerController / MultiplayerController vtable: the per-frame game-thread hook"
+    },
+    {
+      "name": "sngac_olpc",
+      "kind": "vtable_slot",
+      "rva": "0x29812D8",
+      "expect": "30e8744101000000",
+      "symbol": "my_SNGAC",
+      "note": "slot +0xa88 (AOLPlayerController::StartNewGameAtCheckpoint, 0x174e830): every checkpoint load passes here; the hook tells the partner"
+    },
+    {
+      "name": "sngac_mpc",
+      "kind": "vtable_slot",
+      "rva": "0x2982708",
+      "expect": "30e8744101000000",
+      "symbol": "my_SNGAC",
+      "note": "slot +0xa88 (AOLPlayerController::StartNewGameAtCheckpoint, 0x174e830): every checkpoint load passes here; the hook tells the partner"
+    },
+    {
+      "name": "world_dispatch",
+      "kind": "call_vt6",
+      "rva": "0x172E76C",
+      "expect": "ff9098020000",
+      "symbol": "my_WorldPacket",
+      "note": "call [rax+0x298] = UWorldChannel::OnBinaryWorldPacket(ch, sender, type, data, len) in OnReceiveBinaryData"
     }
   ],
   "layout": {
@@ -54,12 +78,23 @@
     "cmd_arg_len": 72,
     "res_seq": 76,
     "res_code": 80,
-    "cmd_arg": 128
+    "cmd_arg": 128,
+    "follow_pending": 384,
+    "cnt_follow_sent": 388,
+    "cnt_follow_recv": 392,
+    "cnt_follow_exec": 396,
+    "cnt_echo_suppressed": 400,
+    "cnt_rebroadcast": 404,
+    "rebroadcast_ctrl": 416,
+    "follow_name": 512,
+    "follow_persist": 640,
+    "expect_name": 768,
+    "persist_table": 2048
   },
   "layout_doc": {
     "magic": "u32 0x5846504F ('OFPX' little endian) set by the first hook that runs; 0 means no hook has run yet",
     "version": "u32, 2 for this layout",
-    "disable": "u32 bit mask, a SET bit switches a feature off at run time (the twin switch of a test); bit 0 = one-owner enemy rule, bit 1 = command mailbox",
+    "disable": "u32 bit mask, a SET bit switches a feature off at run time; bit 0 = one-owner enemy rule, bit 1 = command mailbox, bit 2 = shared checkpoint loads",
     "cnt_apply_calls": "u32 calls of the ApplySpawn hook",
     "cnt_send_calls": "u32 calls of the SendSpawn hook",
     "cnt_own_destroyed": "u32 times our own enemy was destroyed as a duplicate",
@@ -69,6 +104,54 @@
     "cmd_arg_len": "u32 bytes of cmd_arg in use",
     "res_seq": "u32 game -> test: set to cmd_seq when the command has been handled",
     "res_code": "i32 0 = started, 2 = unknown command, 3 = bad argument",
-    "cmd_arg": "256 bytes"
+    "cmd_arg": "256 bytes",
+    "follow_pending": "u32 set by the receive hook when a partner's WORLD_CHECKPOINT_LOAD (0x11) arrived; the per-frame hook loads follow_name and clears it",
+    "cnt_follow_sent": "u32 checkpoint loads told to the partners",
+    "cnt_follow_recv": "u32 checkpoint packets received",
+    "cnt_follow_exec": "u32 partner loads executed here",
+    "cnt_echo_suppressed": "u32 loads not re-sent because they were a partner's load",
+    "cnt_rebroadcast": "u32 times our enemies were announced again because a partner had a copy of one of them (the partner may have loaded after our first announcement)",
+    "rebroadcast_ctrl": "u64 the multiplayer controller whose 'already announced' list the per-frame hook clears (0 = nothing to do)",
+    "follow_name": "char[128]",
+    "follow_persist": "char[128]",
+    "expect_name": "char[128] the partner's load being executed here (echo guard)",
+    "persist_table": "pairs 'checkpoint-name prefix NUL persistent level NUL', ends with an empty prefix; written into the file by the applier (data_init)"
+  },
+  "data_init": {
+    "field": "persist_table",
+    "pairs": [
+      [
+        "Admin_",
+        "AdminBlock_Persistent"
+      ],
+      [
+        "Revisit_",
+        "AdminBlock_Revisit_Persistent"
+      ],
+      [
+        "Prison_",
+        "Prison_Persistent"
+      ],
+      [
+        "Sewer_",
+        "Sewer_Persistent"
+      ],
+      [
+        "Male_",
+        "Male_Persistent"
+      ],
+      [
+        "Courtyard_",
+        "Courtyard_Persistent"
+      ],
+      [
+        "Female_",
+        "Female_Persistent"
+      ],
+      [
+        "Lab_",
+        "Lab_Persistent"
+      ]
+    ]
   }
 }

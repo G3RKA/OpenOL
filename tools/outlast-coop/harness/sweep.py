@@ -14,13 +14,15 @@ Results are appended as JSON lines to sweep_<Group>.jsonl and printed as one lin
 import json, math, os, re, subprocess, sys, time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-import ol, census
+import ol, census, olmail
 
 GROUPS = {
     "Admin": "Admin_Gates Admin_Garden Admin_MainHall Admin_Mezzanine Admin_SecurityRoom Admin_WheelChair Admin_Electricity Admin_Basement Admin_PostBasement Admin_Explosion",
     "Courtyard": "Courtyard_Start Courtyard_Soldier1 Courtyard_Soldier2 Courtyard_Chapel Courtyard_Corridor Courtyard_FemaleWard",
 }
 RADIUS = 150.0
+PERSIST = {"Admin": "AdminBlock_Persistent", "Prison": "Prison_Persistent", "Sewer": "Sewer_Persistent", "Male": "Male_Persistent", "Courtyard": "Courtyard_Persistent",
+           "Female": "Female_Persistent", "Revisit": "AdminBlock_Revisit_Persistent", "Lab": "Lab_Persistent"}
 
 
 def names_of(group):
@@ -63,12 +65,35 @@ def double_sim(ra, rb):
     return sum(1 for p in a if any(math.dist(p, q) < RADIUS for q in b))
 
 
+def load(c, name, timeout=120):
+    """Load a checkpoint on one client through the patch's mailbox (no mouse, no keyboard) and wait for the game's own 'Applying checkpoint' line."""
+    mark = log_marker(c)
+    code, _ = olmail.send_load(c["pid"], name, PERSIST.get(name.split("_")[0], ""))
+    if code != 0:
+        return False
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        try:
+            if f"GS - Applying checkpoint {name}" in open(c["log"], encoding="utf-8", errors="replace").read()[mark:]:
+                return True
+        except OSError:
+            pass
+        time.sleep(1)
+    return False
+
+
 def check(name):
     cs = ol.clients()
     marks = [log_marker(c) for c in cs]
-    ok = [ol.cp(i, name) for i in range(len(cs))]
+    ok = [load(c, name) for c in cs]
     time.sleep(12)
     res = {"checkpoint": name, "applied": ok}
+    st = ol.read_state()["heroes"]
+    stale = [round(time.time() - st[str(c["port"])]["t"]) if str(c["port"]) in st else -1 for c in cs]
+    if any(s < 0 or s > 45 for s in stale):          # a client that stopped sending its hero is stuck (e.g. a map travel that never ends)
+        res["hang"] = stale
+        res["log_tail"] = [bad_log_lines(c, m)[:2] for c, m in zip(cs, marks)]
+        return res
     if not all(alive_pid(c["pid"]) for c in cs) or any(bad_log_lines(c, m) for c, m in zip(cs, marks)):
         res["crash"] = [alive_pid(c["pid"]) for c in cs]
         res["log"] = [bad_log_lines(c, m)[:2] for c, m in zip(cs, marks)]
@@ -81,22 +106,35 @@ def check(name):
     return res
 
 
+START_MAP = "prison_persistent"     # --map <persistent map> starts the clients on the group's own map, so the loader never needs a map travel
+
+
+def start_pair():
+    """Two clients; the sweep loads every checkpoint on both itself, so the patch's shared checkpoint (v4, disable bit 2) is switched off for it."""
+    ol.up()
+    ol.launch(2, START_MAP)
+    for c in ol.clients():
+        try:
+            olmail.set_disable(c["pid"], 4)
+        except (OSError, KeyError):
+            pass                     # an exe without that feature: nothing to switch off
+
+
 def run_group(group, names):
     out = open(os.path.join(HERE, f"sweep_{group}.jsonl"), "a", encoding="utf-8")
     ol.down()
-    ol.up()
-    ol.launch(2, "prison_persistent")
+    start_pair()
     for name in names:
         res = check(name)
         out.write(json.dumps(res) + "\n")
         out.flush()
-        flag = "CRASH" if "crash" in res else ("DOUBLE_SIM" if res["double_sim"] else ("COUNT_DIFF" if res["count_diff"] else "ok"))
-        extra = res.get("client", res.get("log", ""))
+        flag = ("HANG" if "hang" in res else "CRASH" if "crash" in res else
+                "DOUBLE_SIM" if res["double_sim"] else "COUNT_DIFF" if res["count_diff"] else "ok")
+        extra = res.get("client", res.get("log", res.get("hang", "")))
         print(f"{group:9s} {name:30s} {flag:10s} applied={res['applied']} {extra}", flush=True)
-        if "crash" in res:               # restart the pair and go on with the next checkpoint
+        if "crash" in res or "hang" in res:     # restart the pair and go on with the next checkpoint
             ol.down()
-            ol.up()
-            ol.launch(2, "prison_persistent")
+            start_pair()
     ol.down()
 
 
@@ -105,5 +143,10 @@ if __name__ == "__main__":
         for g, v in GROUPS.items():
             print(g, len(v.split()), "checkpoints")
         sys.exit(0)
-    group = sys.argv[1]
-    run_group(group, sys.argv[2:] or names_of(group))
+    args = sys.argv[1:]
+    if "--map" in args:
+        i = args.index("--map")
+        START_MAP = args[i + 1]
+        del args[i:i + 2]
+    group = args[0]
+    run_group(group, args[1:] or names_of(group))

@@ -14,6 +14,19 @@ import pe
 RWX_CODE_DATA = 0xE0000060     # code + initialized data + execute + read + write (a section that carries mutable state)
 
 
+def data_init_bytes(cfg):
+    """The initial content of the data area: zero except the tables listed in data_init (written into the file, so the game starts with them)."""
+    area = bytearray(cfg["section"].get("data_size", 0))
+    init = cfg.get("data_init")
+    if init:
+        off = cfg["layout"][init["field"]]
+        blob = b"".join(p.encode("ascii") + b"\x00" + v.encode("ascii") + b"\x00" for p, v in init["pairs"]) + b"\x00"
+        if off + len(blob) > len(area):
+            raise ValueError("data_init does not fit in the data area")
+        area[off:off + len(blob)] = blob
+    return bytes(area)
+
+
 def apply(data, cfg):
     """Returns the patched bytes of `data` (checks every expectation; raises ValueError on any mismatch)."""
     if hashlib.sha256(data).hexdigest() != cfg["input_sha256"]:
@@ -22,8 +35,10 @@ def apply(data, cfg):
     code = bytes.fromhex(cfg["hex"])
     sec = cfg["section"]
     if sec.get("data_size", 0):
-        page = pe._align(len(code), 0x1000)
-        payload, chars = code + b"\0" * (page - len(code)) + b"\0" * sec["data_size"], RWX_CODE_DATA
+        off = int(sec.get("data_offset", "0"), 16) or pe._align(len(code), 0x1000)
+        if len(code) > off:
+            raise ValueError(f"the code ({len(code)} bytes) overlaps the data area at {off:#x}")
+        payload, chars = code + bytes(off - len(code)) + data_init_bytes(cfg), RWX_CODE_DATA
     else:
         payload, chars = code, pe.IMAGE_SCN_CNT_CODE | pe.IMAGE_SCN_MEM_EXECUTE | pe.IMAGE_SCN_MEM_READ
     cave = p.add_section(sec["name"], payload, chars)

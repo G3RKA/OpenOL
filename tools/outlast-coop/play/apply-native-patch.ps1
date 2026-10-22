@@ -80,7 +80,17 @@ if ($dataSize -gt 0) {                                 # a section that also car
     $dataOff = [Convert]::ToInt32($j.section.data_offset, 16)
     if ($code.Length -gt $dataOff) { throw "the code ($($code.Length) bytes) overlaps the data area at 0x$('{0:x}' -f $dataOff)" }
     while ($payload.Count -lt $dataOff) { $payload.Add(0) }
-    for ($k = 0; $k -lt $dataSize; $k++) { $payload.Add(0) }
+    $area = New-Object byte[] $dataSize                # zero, except the tables of data_init (e.g. checkpoint-name prefix -> persistent level)
+    if ($j.data_init) {
+        $pos = [int]$j.layout.($j.data_init.field)
+        foreach ($pair in $j.data_init.pairs) {
+            foreach ($str in @($pair[0], $pair[1])) {
+                $sb = [System.Text.Encoding]::ASCII.GetBytes($str)
+                [Array]::Copy($sb, 0, $area, $pos, $sb.Length); $pos += $sb.Length + 1
+            }
+        }
+    }
+    $payload.AddRange($area)
     $chars = [Convert]::ToUInt32("E0000060", 16)        # code + initialized data + execute + read + write
 }
 $code = $payload.ToArray()

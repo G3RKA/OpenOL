@@ -59,7 +59,7 @@ def main():
     check("section-characteristics", sn[-1]["ch"] == want_ch, hex(sn[-1]["ch"]))
     if cfg["section"].get("data_size", 0):
         off = int(cfg["section"]["data_offset"], 16)
-        check("data-area-is-zero-and-after-the-code", off >= len(code) and pn.read(cave + off, cfg["section"]["data_size"]) == bytes(cfg["section"]["data_size"]), f"data at +{off:#x}, {cfg['section']['data_size']} bytes")
+        check("data-area-has-its-initial-content-and-follows-the-code", off >= len(code) and pn.read(cave + off, cfg["section"]["data_size"]) == apply_patch.data_init_bytes(cfg), f"data at +{off:#x}, {cfg['section']['data_size']} bytes")
         check("layout-fields-inside-the-data-area", all(0 <= v < cfg["section"]["data_size"] for v in cfg["layout"].values()))
     check("size-of-image-covers-the-section", struct.unpack_from("<I", out, pn.opt + 56)[0] >= cave + sn[-1]["vs"])
 

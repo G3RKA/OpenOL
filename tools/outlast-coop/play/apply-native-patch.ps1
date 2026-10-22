@@ -17,10 +17,9 @@ param(
 )
 $ErrorActionPreference = "Stop"
 
-$EXPECT   = "2e58afbb1203d04476581f34216428d1dfc96228e5f3df8c6881323c56c93346"  # OLGame.exe of OpenOL 2.1.0, Outlast Steam build 576074
-$RESULT   = "6ee34bd030353dcfc17b3b107b50685e36ccc0e20c57cdf361b0280c54fd89cd"  # the patched exe this script must produce
-$SITE_AS  = 0x172B0B4   # E8 rel32: call ApplySpawn in OnBinaryPacket
-$SITE_SS  = 0x1736CAB   # FF 90 68 02 00 00: vtable call SendSpawn in TickSend
+$j      = Get-Content -Raw $Blob | ConvertFrom-Json          # code, entries and the site table (built from sites.json)
+$EXPECT = $j.input_sha256                              # OLGame.exe of OpenOL 2.1.0, Outlast Steam build 576074
+$RESULT = $j.output_sha256                             # the patched exe this script must produce
 
 if (-not (Test-Path $Exe)) { throw "input not found: $Exe" }
 $inFull  = (Resolve-Path -LiteralPath $Exe).Path
@@ -31,7 +30,6 @@ $data = [System.IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $Exe))
 $sha  = ([System.BitConverter]::ToString((New-Object Security.Cryptography.SHA256Managed).ComputeHash($data)) -replace '-').ToLower()
 if ($sha -ne $EXPECT) { throw "refusing: input SHA-256 is $sha; this patch is for $EXPECT (OpenOL 2.1.0 on Steam build 576074). Install OpenOL 2.1.0 over a game copy first." }
 
-$j    = Get-Content -Raw $Blob | ConvertFrom-Json
 $code = for ($i = 0; $i -lt $j.hex.Length; $i += 2) { [Convert]::ToByte($j.hex.Substring($i, 2), 16) }
 $code = [byte[]]$code
 
@@ -44,6 +42,7 @@ function Align($v, $a) { [long][math]::Floor(([long]$v + $a - 1) / $a) * $a }
 $pe = U32 0x3C
 if ([System.Text.Encoding]::ASCII.GetString($data, $pe, 2) -ne "PE") { throw "not a PE file" }
 $opt    = $pe + 24
+$imagebase = [BitConverter]::ToUInt64($data, $opt + 24)
 if ((U16 $opt) -ne 0x20B) { throw "not a 64-bit PE" }
 $nsec   = U16 ($pe + 6)
 $optsz  = U16 ($pe + 20)
@@ -73,7 +72,18 @@ for ($k = 0; $k -lt 40; $k++) { if ($data[$hdrEnd + $k] -ne 0) { throw "section 
 $last = $secs | Sort-Object va | Select-Object -Last 1
 $va   = Align ($last.va + [Math]::Max($last.vs, $last.rs)) $secal
 $rp   = Align $data.Length $fileal
+$dataSize = [int]$j.section.data_size
+$payload  = New-Object System.Collections.Generic.List[byte]
+$payload.AddRange($code)
+$chars = [uint32]0x60000020                            # CODE | EXECUTE | READ
+if ($dataSize -gt 0) {                                 # a section that also carries mutable state: pad the code to a page, then the zeroed data
+    while ($payload.Count -lt (Align $code.Length 0x1000)) { $payload.Add(0) }
+    for ($k = 0; $k -lt $dataSize; $k++) { $payload.Add(0) }
+    $chars = [Convert]::ToUInt32("E0000060", 16)        # code + initialized data + execute + read + write
+}
+$code = $payload.ToArray()
 $rs   = Align $code.Length $fileal
+if ($va -ne [Convert]::ToInt64($j.section.cave_rva, 16)) { throw "the new section would land at 0x$('{0:x}' -f $va), the code was built for $($j.section.cave_rva)" }
 
 $img = New-Object System.Collections.Generic.List[byte]
 $img.AddRange($data)
@@ -88,29 +98,31 @@ Put32 $hdr 8  $code.Length
 Put32 $hdr 12 $va
 Put32 $hdr 16 $rs
 Put32 $hdr 20 $rp
-Put32 $hdr 36 ([uint32]0x60000020)   # CODE | EXECUTE | READ
+Put32 $hdr 36 $chars
 [Array]::Copy($hdr, 0, $buf, $hdrEnd, 40)
 Put16 $buf ($pe + 6)  ($nsec + 1)
 Put32 $buf ($opt + 56) (Align ($va + $code.Length) $secal)   # SizeOfImage
 Put32 $buf ($opt + 64) 0                                      # CheckSum (not used by the loader for an exe)
 
-# --- redirect the two call sites (offsets are the same in $buf: everything was appended after them) ---
-$asOff = RvaToOff $SITE_AS
-if ($buf[$asOff] -ne 0xE8) { throw "unexpected bytes at the ApplySpawn call site" }
-$rel = $va + [int]$j.entries.my_ApplySpawn - ($SITE_AS + 5)
-[Array]::Copy([BitConverter]::GetBytes([int]$rel), 0, $buf, $asOff + 1, 4)
-
-$ssOff = RvaToOff $SITE_SS
-$want  = [byte[]](0xFF,0x90,0x68,0x02,0x00,0x00)
-for ($k = 0; $k -lt 6; $k++) { if ($buf[$ssOff + $k] -ne $want[$k]) { throw "unexpected bytes at the SendSpawn call site" } }
-$buf[$ssOff] = 0xE8
-$rel = $va + [int]$j.entries.my_SendSpawn - ($SITE_SS + 5)
-[Array]::Copy([BitConverter]::GetBytes([int]$rel), 0, $buf, $ssOff + 1, 4)
-$buf[$ssOff + 5] = 0x90   # NOP the 6th byte of the old instruction
+# --- rewrite the sites of the table (offsets are the same in $buf: everything was appended after them) ---
+foreach ($site in $j.sites) {
+    $rva    = [Convert]::ToInt64($site.rva, 16)
+    $off    = RvaToOff $rva
+    $expect = New-Object byte[] ($site.expect.Length / 2)
+    for ($k = 0; $k -lt $expect.Length; $k++) { $expect[$k] = [Convert]::ToByte($site.expect.Substring(2 * $k, 2), 16) }
+    for ($k = 0; $k -lt $expect.Length; $k++) { if ($buf[$off + $k] -ne $expect[$k]) { throw "unexpected bytes at site $($site.name) (0x$('{0:x}' -f $rva))" } }
+    $target = $va + [int]$j.entries.($site.symbol)
+    switch ($site.kind) {
+        "call32"      { $buf[$off] = 0xE8; [Array]::Copy([BitConverter]::GetBytes([int]($target - ($rva + 5))), 0, $buf, $off + 1, 4) }
+        "call_vt6"    { $buf[$off] = 0xE8; [Array]::Copy([BitConverter]::GetBytes([int]($target - ($rva + 5))), 0, $buf, $off + 1, 4); $buf[$off + 5] = 0x90 }
+        "vtable_slot" { [Array]::Copy([BitConverter]::GetBytes([uint64]($imagebase + $target)), 0, $buf, $off, 8) }
+        default       { throw "unknown site kind $($site.kind)" }
+    }
+}
 
 [System.IO.File]::WriteAllBytes($Out, $buf)
 $osha = ([System.BitConverter]::ToString((New-Object Security.Cryptography.SHA256Managed).ComputeHash($buf)) -replace '-').ToLower()
 Write-Host "patched copy written: $Out"
-Write-Host "  new section .olfix at RVA 0x$('{0:x}' -f $va), $($code.Length) bytes"
+Write-Host "  new section $($j.section.name) at RVA 0x$('{0:x}' -f $va), $($code.Length) bytes, $(@($j.sites).Count) sites"
 Write-Host "  sha256 $osha"
-if ($osha -ne $RESULT) { Write-Warning "sha256 differs from the reference patched exe ($RESULT); check the inputs." }
+if ($RESULT -and ($osha -ne $RESULT)) { Write-Warning "sha256 differs from the reference patched exe ($RESULT); check the inputs." }

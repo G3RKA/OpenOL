@@ -38,3 +38,12 @@ python -I apply_patch.py <game copy>\Binaries\Win64\OLGame.exe OLGame_patched.ex
 
 Not tested yet: a scripted story enemy that the story waits for (the destroyed copy may stall a script on the higher-id client), enemies of one class
 standing closer than 150 units to each other, three players, two PCs.
+
+## Patch tooling (v2 layout)
+
+- `sites.json` is the one table of what is patched: the input SHA-256, the reference output SHA-256, the new section (name, RVA, size of an optional zeroed data area that makes the
+  section writable) and the list of sites (`call32`: a direct call, `call_vt6`: a 6-byte virtual call turned into a direct call plus a nop, `vtable_slot`: an absolute pointer),
+  each with the bytes that must be there before it is touched.
+- `build.py` compiles `olfix.c` and writes `olfix.json` (code, entry offsets and the table). `apply_patch.py` and `play/apply-native-patch.ps1` both read only `olfix.json`.
+- `selftest.py <original OLGame.exe>` is a static test with no game: reference hash, only the allowed bytes changed, every site decodes to its entry, characteristics, and three
+  refusals. The two appliers produce identical bytes (checked for the plain section and for the section with a data area).

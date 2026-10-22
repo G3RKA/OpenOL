@@ -1,0 +1,139 @@
+/*
+ * One owner for every map enemy (OpenOL 2.1.0, OLGame.exe sha256 2e58afbb...).
+ *
+ * The bug: every client runs the AI copy of a map-placed enemy and sends it to the others, and every client turns the copy it receives
+ * into a second, puppet enemy. Players see two enemies at one place.
+ * The rule added here: when two copies of one enemy meet (same place), the copy of the client with the LOWER player id stays real; the other
+ * client removes its own copy and keeps the puppet of the lower id's one. Enemies that exist on one client only are untouched.
+ *
+ * Two hooks, both patched into OLGame.exe by apply_patch.py:
+ *   my_ApplySpawn  replaces the only direct call of the static ApplySpawn() (a spawn packet arrived from `sender`): runs the original (it makes
+ *                  the puppet), then if one of our own enemies of the same class is at the puppet's place:
+ *                                                              sender < me: destroy ours (keep the puppet);
+ *                                                              sender > me: destroy the puppet (the sender drops its copy when it hears of ours).
+ *   my_SendSpawn   replaces the virtual call UEnemyChannel::SendSpawn(E) inside TickSend (we are about to announce our enemy E):
+ *                  a puppet of another client is already at E's place -> its owner < me: destroy E, announce nothing;
+ *                                                                        its owner > me: destroy that puppet, announce E.
+ *
+ * Freestanding on purpose: no libc, no imports, no relocations. The image base comes from the PEB, so ASLR does not matter.
+ * Offsets were read from the decompiled code and checked against Development/Src/Multiplayer/Src/EnemyChannel.cpp of OpenOL.
+ */
+typedef int i32;
+typedef unsigned int u32;
+typedef unsigned char u8;
+
+static inline char *IB(void)
+{
+    char *p;
+    __asm__ volatile("movq %%gs:0x60, %0\n\tmovq 0x10(%0), %0" : "=r"(p));
+    return p;
+}
+
+#define RVA_APPLYSPAWN    0x171eb00   /* static void ApplySpawn(UEnemyChannel*, INT sender, FString& name, FString& class, FLOAT x,y,z, INT yaw, ...) */
+#define RVA_DESTROYACTOR  0x08d7550   /* UBOOL UWorld::DestroyActor(AActor*, UBOOL bNetForce, UBOOL bShouldModifyLevel) */
+#define RVA_GWORLD        0x30d1e58   /* UWorld* GWorld */
+#define RVA_LOCALPLAYERID 0x36b9a70   /* GMpConn.LocalPlayerID */
+#define RVA_SYNCENEMIES   0x36b9aec   /* GMpConn.SyncEnemies */
+
+#define CH_CONTROLLER     0x60        /* UEnemyChannel::ControllerOwner */
+#define CTRL_CACHED       0xe78       /* AMultiplayerController::CachedEnemies  data ptr, count at +8 */
+#define CTRL_REMOTE       0xeb8       /* AMultiplayerController::RemoteEnemies  data ptr, count at +8, element size 0x44 */
+#define REMOTE_STRIDE     0x44
+#define REMOTE_DUMMY      0x10        /* FRemoteEnemyState::DummyEnemy */
+#define REMOTE_OWNER      0x18        /* FRemoteEnemyState::OwnerID */
+#define ACTOR_LOC         0x80        /* AActor::Location (3 floats) */
+#define PAWN_HEALTH       0x37c
+#define ACTOR_FLAGS_A     0xe8        /* bit 8 = bDeleteMe */
+#define ACTOR_FLAGS_B     0xec        /* bit 0x800000 = bPendingDelete */
+
+#define OBJ_CLASS         0x50        /* UObject::Class (Index at +0x38 and Name at +0x48 were confirmed in GetName()) */
+#define SAME_PLACE_SQ_BITS 0x46afc800u /* 150 * 150 as float bits: an integer immediate, so the compiler emits no .rdata constant */
+
+typedef void (*ApplySpawnFn)(char *, i32, void *, void *, float, float, float, i32, void *, i32, i32, float, float, float, float);
+typedef void (*SendSpawnFn)(char *, char *);
+
+static inline void destroy_actor(char *ib, char *actor)
+{
+    ((i32(*)(void *, void *, i32, i32))(ib + RVA_DESTROYACTOR))(*(void **)(ib + RVA_GWORLD), actor, 0, 1);
+}
+
+static inline int alive(const char *e)
+{
+    return *(i32 *)(e + PAWN_HEALTH) > 0 && !(*(u8 *)(e + ACTOR_FLAGS_A) & 8) && !(*(u32 *)(e + ACTOR_FLAGS_B) & 0x800000u);
+}
+
+static inline float same_place_sq(void)
+{
+    float k;
+    __asm__("movl %1, %%eax; movd %%eax, %0" : "=x"(k) : "i"(SAME_PLACE_SQ_BITS) : "eax");
+    return k;
+}
+
+static inline float dist2(const char *e, float x, float y, float z)
+{
+    float dx = *(const float *)(e + ACTOR_LOC) - x;
+    float dy = *(const float *)(e + ACTOR_LOC + 4) - y;
+    float dz = *(const float *)(e + ACTOR_LOC + 8) - z;
+    return dx * dx + dy * dy + dz * dz;
+}
+
+__attribute__((noinline, used))
+void my_ApplySpawn(char *ch, i32 sender, void *name, void *cls, float x, float y, float z, i32 yaw, void *mesh, i32 weapon, i32 has_color,
+                   float cr, float cg, float cb, float ca)
+{
+    char *ib = IB();
+    char *ctrl = ch ? *(char **)(ch + CH_CONTROLLER) : 0;
+    i32 n0 = ctrl ? *(i32 *)(ctrl + CTRL_REMOTE + 8) : 0;
+    ((ApplySpawnFn)(ib + RVA_APPLYSPAWN))(ch, sender, name, cls, x, y, z, yaw, mesh, weapon, has_color, cr, cg, cb, ca);
+    if (!ctrl || !*(i32 *)(ib + RVA_SYNCENEMIES))
+        return;
+    i32 n1 = *(i32 *)(ctrl + CTRL_REMOTE + 8);
+    if (n1 <= n0)
+        return;                                   /* the original ignored the packet (already known) */
+    char *r = *(char **)(ctrl + CTRL_REMOTE) + (long long)(n1 - 1) * REMOTE_STRIDE;
+    char *d = *(char **)(r + REMOTE_DUMMY);       /* the puppet the original just made */
+    if (!d)
+        return;
+    char **arr = *(char ***)(ctrl + CTRL_CACHED);
+    i32 n = *(i32 *)(ctrl + CTRL_CACHED + 8);
+    for (i32 i = 0; arr && i < n; i++) {
+        char *e = arr[i];
+        if (!e || e == d || !alive(e) || *(void **)(e + OBJ_CLASS) != *(void **)(d + OBJ_CLASS) || dist2(e, *(float *)(d + ACTOR_LOC), *(float *)(d + ACTOR_LOC + 4), *(float *)(d + ACTOR_LOC + 8)) >= same_place_sq())
+            continue;
+        if (sender > *(i32 *)(ib + RVA_LOCALPLAYERID)) {
+            *(char **)(r + REMOTE_DUMMY) = 0;     /* ours is the real one: no puppet of the sender's copy */
+            destroy_actor(ib, d);
+        } else {
+            destroy_actor(ib, e);                 /* the sender's is the real one: drop our copy, keep the puppet */
+        }
+        break;
+    }
+}
+
+__attribute__((noinline, used))
+void my_SendSpawn(char *ch, char *e)
+{
+    char *ib = IB();
+    char *ctrl = ch ? *(char **)(ch + CH_CONTROLLER) : 0;
+    if (ctrl && e && *(i32 *)(ib + RVA_SYNCENEMIES)) {
+        char *rem = *(char **)(ctrl + CTRL_REMOTE);
+        i32 n = *(i32 *)(ctrl + CTRL_REMOTE + 8);
+        float x = *(float *)(e + ACTOR_LOC), y = *(float *)(e + ACTOR_LOC + 4), z = *(float *)(e + ACTOR_LOC + 8);
+        for (i32 i = 0; rem && i < n; i++) {
+            char *r = rem + (long long)i * REMOTE_STRIDE;
+            char *d = *(char **)(r + REMOTE_DUMMY);
+            if (!d || *(void **)(d + OBJ_CLASS) != *(void **)(e + OBJ_CLASS) || dist2(d, x, y, z) >= same_place_sq())
+                continue;
+            if (*(i32 *)(r + REMOTE_OWNER) < *(i32 *)(ib + RVA_LOCALPLAYERID)) {
+                destroy_actor(ib, e);        /* a lower id owns this enemy: ours is the duplicate */
+                return;
+            }
+            *(char **)(r + REMOTE_DUMMY) = 0;
+            destroy_actor(ib, d);            /* a higher id's puppet: ours is the real one */
+            break;
+        }
+    }
+    /* the original SendSpawn, found through the vtable the patched call site no longer reads */
+    char *vt = *(char **)ch;
+    (*(SendSpawnFn *)(vt + 0x268))(ch, e);
+}

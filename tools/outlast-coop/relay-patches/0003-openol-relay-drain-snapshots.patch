@@ -1,0 +1,12 @@
+OpenOL-Relay: call server_drain_snaps in the CLI main loop. Without it the late-join snapshot queue (pickups, matinee and hero state, and the automatic door/enemy/pushable replay) is filled but never sent. Against b9def512 src/. Apply: patch -p1 -d src < this file. Tests: harness/relay_state_test.py S9 to S13.
+
+--- a/main.cpp
++++ b/main.cpp
+@@ -157,6 +157,7 @@
+ 
+         run_heartbeat(g_server);
+         run_timeout(g_server);
++        server_drain_snaps(g_server);   /* the CLI loop never drained the late-join snapshot queue */
+ 
+         if (cli_poll())
+             cli_dispatch(g_server, cli_last_cmd);

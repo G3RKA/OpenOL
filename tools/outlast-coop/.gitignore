@@ -1,0 +1,6 @@
+exe-patch/olfix.o
+exe-patch/olfix.bin
+__pycache__/
+*.pyc
+state.json
+*.log

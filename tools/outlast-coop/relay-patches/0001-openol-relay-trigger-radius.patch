@@ -1,0 +1,88 @@
+OpenOL-Relay: optional interest filter for world triggers (--trigger-radius <units>). Against OpenOL-Relay b9def512 src/. Default 0 = off. Apply: patch -p1 -d src < this file. Tests: harness/relay_filter_test.py T1-T5, suite.py B.
+
+--- a/server.h
++++ b/server.h
+@@ -369,6 +369,13 @@
+ 
+ void    server_send(Server *s, const Addr *addr, const char *msg, int len);
+ void    server_relay(Server *s, Player *sender, const char *payload, int len);
++
++/* Interest filter for world triggers (WORLD_TRIGGER_ACT / WORLD_TRIGGER_FIRE).
++ * 0 (default) = off: triggers go to everybody in the room, as upstream does.
++ * > 0 = world units: a trigger is forwarded only to players whose last known hero position is within this
++ * distance of the sender's. If either position is unknown the trigger is forwarded (fail open). */
++extern double g_trigger_radius;
++void    server_relay_near(Server *s, Player *sender, const char *payload, int len, double radius);
+ void    server_broadcast_room(Server *s, int room_idx, const char *msg, int len);
+ void    server_snap_enqueue(Player *p, const char *data, int len);
+ void    server_drain_snaps(Server *s);  // called each tick
+--- a/server.c
++++ b/server.c
+@@ -246,6 +246,34 @@
+     }
+ }
+ 
++double g_trigger_radius = 0.0;
++
++/* Hero position from the last HERO_STATE snapshot. The snapshot is the raw client packet
++ * [channel][type][player_id LE4][x f32][y f32][z f32]...; floats are little endian like the host. */
++static int player_pos(const Player *p, float out[3]) {
++    if (p->state_snap_len < 18) return 0;
++    memcpy(out, p->state_snap + 6, 12);
++    for (int i = 0; i < 3; i++)
++        if (!(out[i] > -1e7f && out[i] < 1e7f)) return 0;   /* NaN or absurd */
++    return 1;
++}
++
++void server_relay_near(Server *s, Player *sender, const char *payload, int len, double radius) {
++    int room_idx = sender->room_idx;
++    float sp[3];
++    int have_sender = player_pos(sender, sp);
++    for (int i = 0; i < MAX_CLIENTS; i++) {
++        Player *p = &s->players[i];
++        if (!p->used || p == sender || p->room_idx != room_idx) continue;
++        float rp[3];
++        if (have_sender && player_pos(p, rp)) {
++            double dx = (double)sp[0] - rp[0], dy = (double)sp[1] - rp[1], dz = (double)sp[2] - rp[2];
++            if (dx * dx + dy * dy + dz * dz > radius * radius) continue;
++        }
++        server_send(s, &p->addr, payload, len);
++    }
++}
++
+ void server_broadcast_room(Server *s, int room_idx, const char *msg, int len) {
+     for (int i = 0; i < MAX_CLIENTS; i++) {
+         Player *p = &s->players[i];
+@@ -1208,6 +1236,13 @@
+             }
+         }
+ 
++        // World triggers: optionally only to players near the sender (see g_trigger_radius)
++        if (g_trigger_radius > 0.0 && channel == CH_WORLD &&
++            (ptype == WORLD_TRIGGER_ACT || ptype == WORLD_TRIGGER_FIRE)) {
++            server_relay_near(s, pl, data, len, g_trigger_radius);
++            return;
++        }
++
+         // Relay as-is — receivers parse the binary payload themselves
+         server_relay(s, pl, data, len);
+         return;
+--- a/main.cpp
++++ b/main.cpp
+@@ -71,6 +71,7 @@
+         "  --port  <port>   UDP port\n"
+         "  --ip    <addr>   Bind IP\n"
+         "  --name  <name>   Server name\n"
++        "  --trigger-radius <units>  forward world triggers only to players within this distance of the sender (0 = off)\n"
+         "  --log-packets    Log every relayed packet\n"
+         "  --help\n"
+         "All settings are stored in relay.db (same dir as binary).\n",
+@@ -88,6 +89,8 @@
+             strncpy(db->config.bind_ip, argv[++i], DB_IP_BIND_LEN - 1);
+         } else if (!strcmp(argv[i], "--name") && i + 1 < argc) {
+             strncpy(db->config.name, argv[++i], DB_NAME_LEN - 1);
++        } else if (!strcmp(argv[i], "--trigger-radius") && i + 1 < argc) {
++            g_trigger_radius = atof(argv[++i]);
+         } else {
+             fprintf(stderr, "Unknown option: %s\n", argv[i]);
+             print_usage(argv[0]); return false;

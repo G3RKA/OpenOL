@@ -1,0 +1,23 @@
+OpenOL-Relay: use the ENEMY_* packet ids the 2.1.0 client sends (LOC 0x04, door ids 0x05-0x08). Fixes the missing enemy position in the late-join snapshot. Against b9def512 src/. Apply: patch -p1 -d src < this file. Tests: harness/relay_filter_test.py T6, T7.
+
+--- a/server.c
++++ b/server.c
+@@ -56,11 +56,13 @@
+ #define ENEMY_SPAWN      0x01
+ #define ENEMY_DEL        0x02
+ #define ENEMY_SMT        0x03
+-#define ENEMY_DOOR_OPEN  0x04
+-#define ENEMY_DOOR_DONE  0x05
+-#define ENEMY_DOOR_BASH  0x06
+-#define ENEMY_DOOR_BREAK 0x07
+-#define ENEMY_LOC        0x08
++/* Ids as the OpenOL 2.1.0 client sends them (Multiplayer/Inc/PacketChannels.h). Upstream relay had LOC=0x08 and the
++ * door ids shifted by one, so it never stored the enemy position snapshot for late joiners. */
++#define ENEMY_LOC        0x04
++#define ENEMY_DOOR_OPEN  0x05
++#define ENEMY_DOOR_DONE  0x06
++#define ENEMY_DOOR_BASH  0x07
++#define ENEMY_DOOR_BREAK 0x08
+ /* CH_PUSH types */
+ #define PUSH_STATE  0x01
+ #define PUSH_DENIED 0x02

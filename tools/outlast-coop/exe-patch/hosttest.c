@@ -61,6 +61,8 @@ static void *mock_GetFullName(void *obj, void *out, void *stop)
     (void)stop;
     return mock_FString((unsigned long long)obj == 0xA1 ? "AnimSet SE_Pkg.SetA" : "AnimSet SE_Pkg.SetB", (struct fstr *)out);
 }
+static int world_orig_calls; static u32 world_orig_type;
+static void mock_WorldOrig(char *ch, i32 sender, u32 type, const u8 *data, i32 len) { (void)ch; (void)sender; (void)data; (void)len; world_orig_calls++; world_orig_type = type; }
 static char find_class_name[64]; static int find_calls; static void *find_first_class; static void *find_classarg[8]; static char find_names[8][80];
 #define FAKE_ANIMSET_CLASS ((void *)0xA5E7)
 static void *mock_FindObject(void *cls, void *outer, const unsigned short *name, i32 exact)
@@ -237,6 +239,47 @@ int main(void)
     CHECK(addsets_calls == 1 && addsets_to == dummy && addsets_n == 2 && addsets_first == sets[0], "AddAnimSets calls %d, num %d", addsets_calls, addsets_n);
     void **mine = *(void ***)(dummy + PAWN_SPAWNER_SETS);
     CHECK(mine && mine != sets && mine[0] == sets[0] && mine[1] == sets[1] && *(i32 *)(dummy + PAWN_SPAWNER_SETS + 8) == 2, "the puppet's own list was not filled");
+
+    /* ---- the trigger distance gate (WORLD_TRIGGER_ACT from a player who is far away) ---- */
+    static char hero[0x600], rp[0x100], *rps[1];
+    rps[0] = rp;
+    *(char **)(g_ib + RVA_GMPCTRL) = ctrl;
+    *(char **)(ctrl + PC_HEROPAWN) = hero; *(i32 *)(hero + PAWN_HEALTH) = 100;
+    *(float *)(hero + ACTOR_LOC) = 0; *(float *)(hero + ACTOR_LOC + 4) = 0; *(float *)(hero + ACTOR_LOC + 8) = 0;
+    *(char ***)(ctrl + CTRL_REMOTEPLAYERS) = rps; *(i32 *)(ctrl + CTRL_REMOTEPLAYERS + 8) = 1;
+    *(i32 *)(rp + RP_ID) = 5; *(u32 *)(rp + RP_FLAGS) = 1;
+    *(void **)(vt + 0x298) = (void *)mock_WorldOrig;
+    static const u8 trig[8] = {1, 0, 0, 0, 3, 'a', 'b', 'c'};
+    u32 seen0 = d[F_CNT_TRIG_SEEN / 4], drop0 = d[F_CNT_TRIG_DROPPED / 4];
+    float fx = 5000.0f, nx = 1000.0f;
+    *(float *)(rp + RP_LOC) = fx;                                            /* far: 5000 > 3000 */
+    my_WorldPacket(ch, 5, 1, trig, 8);
+    CHECK(world_orig_calls == 0 && d[F_CNT_TRIG_DROPPED / 4] == drop0 + 1 && d[F_CNT_TRIG_SEEN / 4] == seen0 + 1, "far trigger: forwarded %d, dropped %u", world_orig_calls, d[F_CNT_TRIG_DROPPED / 4] - drop0);
+    *(float *)(rp + RP_LOC) = nx;                                            /* near */
+    my_WorldPacket(ch, 5, 1, trig, 8);
+    CHECK(world_orig_calls == 1 && world_orig_type == 1, "near trigger: forwarded %d", world_orig_calls);
+    *(float *)(rp + RP_LOC) = fx; *(u32 *)(rp + RP_FLAGS) = 0;               /* far but no position received yet: applied */
+    my_WorldPacket(ch, 5, 1, trig, 8);
+    CHECK(world_orig_calls == 2, "no position yet: forwarded %d", world_orig_calls);
+    *(u32 *)(rp + RP_FLAGS) = 1;
+    my_WorldPacket(ch, 9, 1, trig, 8);                                       /* a sender we know nothing about: applied */
+    CHECK(world_orig_calls == 3, "unknown sender: forwarded %d", world_orig_calls);
+    *(i32 *)(hero + PAWN_HEALTH) = 0;                                        /* our hero is dead: applied */
+    my_WorldPacket(ch, 5, 1, trig, 8);
+    CHECK(world_orig_calls == 4, "dead hero: forwarded %d", world_orig_calls);
+    *(i32 *)(hero + PAWN_HEALTH) = 100;
+    my_WorldPacket(ch, 5, 0x03, trig, 8);                                    /* another world type is never gated */
+    CHECK(world_orig_calls == 5 && world_orig_type == 3, "other type: forwarded %d", world_orig_calls);
+    float r2 = 500.0f * 500.0f; u32 r2bits; memcpy(&r2bits, &r2, 4);
+    d[F_TRIGGER_R2 / 4] = r2bits;                                            /* a test sets a 500 unit radius: 1000 is far now */
+    *(float *)(rp + RP_LOC) = nx;
+    my_WorldPacket(ch, 5, 1, trig, 8);
+    CHECK(world_orig_calls == 5, "custom radius: forwarded %d", world_orig_calls);
+    d[F_TRIGGER_R2 / 4] = 0;
+    d[F_DISABLE / 4] = DISABLE_TRIGGER; *(float *)(rp + RP_LOC) = fx;
+    my_WorldPacket(ch, 5, 1, trig, 8);
+    CHECK(world_orig_calls == 6, "kill switch: forwarded %d", world_orig_calls);
+    d[F_DISABLE / 4] = 0;
 
     printf("%s\n", fails ? "HOSTTEST FAIL" : "HOSTTEST OK");
     return fails ? 1 : 0;

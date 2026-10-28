@@ -51,7 +51,8 @@ game's memory (read-only) instead of the overlay and the desktop:
 | `shared_cp_live.py` | The shared checkpoint load: a load on one client is followed by the other, no echo back, switched off on the receiver it does not follow, both alive. |
 | `sweep.py <Group> [--map <persistent map>]` | Loads every checkpoint of a group on both clients, one after the other, and checks: the load applied, no hang (hero stream silent), no crash box, equal enemy counts, no enemy simulated twice. |
 | `probe_positions.py <checkpoint> [<checkpoint before>\|-] [<seconds between loads>]` | Enemy and puppet positions per second on both clients and the merge counters. |
-| `probe_anim.py <checkpoint>... [--disable 8]` | Enemy animations, owner against puppet, per second (`Bot->bAnimating`, `bIsAnimatingFullBody`, the animation name, the puppet's animation sets) and the `cnt_anim_*` counters; `--disable 8` is the twin with the feature off. |
+| `trigger_live.py` | Story triggers from a far-away player (the exe patch's distance gate): a scripted peer sends one trigger from an unknown position, from 50000 units away, from the players' position, and again with the gate switched off; run it on the upstream relay. |
+| `probe_anim.py <checkpoint>... [--disable 8\|16]` | Enemy animations, owner against puppet, per second (`Bot->bAnimating`, `bIsAnimatingFullBody`, the animation name, the puppet's animation sets) and the `cnt_anim_*` counters; `--disable 8` is the twin with the feature off. |
 
 ## Typical run
 

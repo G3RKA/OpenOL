@@ -1,11 +1,11 @@
 {
   "input_sha256": "2e58afbb1203d04476581f34216428d1dfc96228e5f3df8c6881323c56c93346",
-  "output_sha256": "a8819b67331ee6ac91f4da0dc5a1de7aae2adfb7e3d78df1e071550a2e74c130",
+  "output_sha256": "1392b18c65d396ba2d6864ceddfbf356b6cdc795987d45798c406318ffcf891d",
   "section": {
     "name": ".olfix",
     "cave_rva": "0x39AF000",
     "data_size": 8192,
-    "data_offset": "0x2000"
+    "data_offset": "0x3000"
   },
   "sites": [
     {
@@ -91,6 +91,9 @@
     "cnt_anim_played": 432,
     "cnt_anim_dropped": 436,
     "cnt_anim_resolved": 444,
+    "cnt_trig_seen": 464,
+    "cnt_trig_dropped": 468,
+    "trigger_r2": 472,
     "anim_wr": 440,
     "last_ctrl": 448,
     "anim_ring": 4096,
@@ -104,7 +107,7 @@
   "layout_doc": {
     "magic": "u32 0x5846504F ('OFPX' little endian) set by the first hook that runs; 0 means no hook has run yet",
     "version": "u32, 5 for this layout",
-    "disable": "u32 bit mask, a SET bit switches a feature off at run time; bit 0 = one-owner enemy rule, bit 1 = command mailbox, bit 2 = shared checkpoint loads, bit 3 = enemy animations, bit 4 = handing the animation sets of a dropped copy to the puppet (value 16)",
+    "disable": "u32 bit mask, a SET bit switches a feature off at run time; bit 0 = one-owner enemy rule, bit 1 = command mailbox, bit 2 = shared checkpoint loads, bit 3 = enemy animations, bit 4 = handing the animation sets of a dropped copy to the puppet (value 16), bit 5 = trigger distance gate (value 32)",
     "cnt_apply_calls": "u32 calls of the ApplySpawn hook",
     "cnt_send_calls": "u32 calls of the SendSpawn hook",
     "cnt_own_destroyed": "u32 times our own enemy was destroyed as a duplicate",
@@ -127,6 +130,9 @@
     "cnt_anim_recv": "u32 enemy-animation packets (WORLD type 0x12) received",
     "cnt_anim_played": "u32 animations started on a puppet through the script function PlayFullBodyAnim",
     "cnt_anim_dropped": "u32 received animations not played (no such puppet, dead, no animation slot, function not found)",
+    "cnt_trig_seen": "u32 world trigger packets (WORLD_TRIGGER_ACT) seen by the distance gate (bit 5 of disable switches it off)",
+    "cnt_trig_dropped": "u32 trigger packets dropped because the sender stood farther from the local hero than the radius",
+    "trigger_r2": "u32 the squared radius of the trigger gate as float bits; 0 = the default, 3000 units (9000000.0)",
     "cnt_anim_resolved": "u32 times a puppet without animation sets found them by the owner's paths (the lookup, not the handover from a twin)",
     "anim_wr": "u32 write index of anim_ring (taken modulo 4)",
     "last_ctrl": "u64 the multiplayer controller seen by the enemy hooks; the per-frame hook plays queued animations only when it runs for this controller",

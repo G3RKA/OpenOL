@@ -9,7 +9,7 @@ Every client runs the AI of each map-placed enemy and sends it; every client tur
 `TickSend` and `ApplySpawn`). The patch adds one rule: when two copies of one enemy meet (same class, within 150 units), the copy of the client with
 the lower player id stays real; the other client destroys its own copy and keeps the puppet. Enemies that exist on one client only are not touched.
 
-The patch has grown since (see the sections below: data area, mailbox, shared checkpoint loads, enemy animations); it now redirects seven sites into about 6.6 KB of position independent code in a new section `.olfix`. The first two sites, the enemy rule:
+The patch has grown since (see the sections below: data area, mailbox, shared checkpoint loads, enemy animations, story triggers from a far player); it now redirects seven sites into about 8 KB of position independent code in a new section `.olfix`. The first two sites, the enemy rule:
 
 | Site (RVA) | Original | Hook | Rule |
 |---|---|---|---|
@@ -80,6 +80,18 @@ and with the one-owner rule the second player only has the puppet. v7 adds (kill
 
 Measured 2026-10-28 with `harness/probe_anim.py` on two real clients: owner and puppet animate together (12 of 12 seconds on two prison checkpoints); counters `cnt_anim_sent`, `cnt_anim_recv`, `cnt_anim_played`, `cnt_anim_dropped`.
 `hosttest.py` (no game) builds `olfix.c` against a fake image and engine mocks and checks the packet bytes, the queue, the FName strings and the call parameters. With the handover switched off (`probe_anim.py --disable 16`) the lookup by path alone gave 12 of 12 seconds on three checkpoints (4 lookups, no `Animation Not Found`).
+
+## Story triggers from a player who is far away (patch v7)
+
+OpenOL forces every trigger a player touches (`WORLD_TRIGGER_ACT`, world type 1) on every client, wherever its player stands, so the story of a player in another part of the map moves on without them
+(relay patch 0001 filters this at the relay by the distance of the two heroes). The exe patch does the same on the receiving client, so it also works with the relay built into the game and with an unpatched relay:
+the packet is dropped before the game sees it when the sender's last known position (`URemotePlayer.LastReceivedLoc`) is farther from the local hero than 3000 units. An unknown position, a sender the client has no position of,
+and a dead or missing local hero let the trigger through. A dropped packet changes nothing locally (the trigger's `TriggerCount` is untouched), so the local player can still fire a one-shot trigger later by touching it.
+Kill switch bit 5 (value 32), counters `cnt_trig_seen` and `cnt_trig_dropped`, the radius can be overridden through the data area (`trigger_r2`, squared, float bits; 0 = default). It is on by default: players who are apart no longer
+pull each other through the story.
+
+Measured 2026-10-28 with `harness/trigger_live.py` (two real clients, a scripted peer, the **upstream** relay, no mouse and no keyboard): a trigger from a peer without a known position fires on both clients, from a peer 50000 units away on none
+(both clients count the drop), from a peer at the players' position on both, and with the gate switched off the far peer's trigger fires on both again. `hosttest.py` covers far, near, unknown position, unknown sender, dead hero, another packet type, a custom radius and the kill switch.
 
 ## Command mailbox (patch v3)
 

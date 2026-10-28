@@ -720,6 +720,55 @@ void my_SNGAC(char *pc, void *fname, i32 bsave)
     bump(d, F_CNT_FOLLOW_SENT);
 }
 
+/* ---- story triggers from a player who is far away -----------------------------------------------------------------------------------------
+   A trigger touched by one player (WORLD_TRIGGER_ACT, type 1) is forced on every client wherever its player stands, so the story of a player who is in
+   another part of the map moves on without them. The relay patch 0001 filters this by the distance of the two heroes; this is the same rule on the receiving
+   client (no relay patch needed, works with the relay built into the game): the packet is dropped before the game sees it when the sender's last known
+   position is farther from the local hero than the radius. Unknown positions, a dead or missing local hero: the trigger is applied as before. The local
+   TriggerCount is not touched by a dropped packet, so the local player can still fire a one-shot trigger later by touching it. */
+#define DISABLE_TRIGGER   32u         /* bit 5 */
+#define WORLD_TRIGGER_ACT 1
+#define RVA_GMPCTRL       0x36b6908   /* AMultiplayerController* GMultiplayerController */
+#define CTRL_REMOTEPLAYERS 0xdf8      /* TArray<URemotePlayer*>: data +0, count +8 */
+#define RP_ID             0x68        /* URemotePlayer::PlayerID */
+#define RP_LOC            0x94        /* URemotePlayer::LastReceivedLoc (3 floats) */
+#define RP_FLAGS          0xb8        /* bit 0 = bHasReceivedData */
+#define TRIGGER_R2_BITS   0x4b095440u /* 3000 * 3000 as float bits */
+
+static inline float trigger_r2(volatile u32 *d)
+{
+    u32 o = d[F_TRIGGER_R2 / 4];      /* a test may set another radius (squared, float bits); 0 = the default */
+    float k;
+    if (o) {
+        __asm__("movd %1, %0" : "=x"(k) : "r"(o));
+        return k;
+    }
+    __asm__("movl %1, %%eax; movd %%eax, %0" : "=x"(k) : "i"(TRIGGER_R2_BITS) : "eax");
+    return k;
+}
+
+static int trigger_far(char *ib, volatile u32 *d, i32 sender)
+{
+    char *ctrl = *(char **)(ib + RVA_GMPCTRL);
+    if (!ctrl)
+        return 0;
+    char *hero = *(char **)(ctrl + PC_HEROPAWN);
+    if (!hero || *(i32 *)(hero + PAWN_HEALTH) <= 0)
+        return 0;
+    char **arr = *(char ***)(ctrl + CTRL_REMOTEPLAYERS);
+    i32 n = *(i32 *)(ctrl + CTRL_REMOTEPLAYERS + 8);
+    for (i32 i = 0; arr && i < n && i < 16; i++) {
+        char *rp = arr[i];
+        if (!rp || *(i32 *)(rp + RP_ID) != sender)
+            continue;
+        if (!(*(u32 *)(rp + RP_FLAGS) & 1u))
+            return 0;                 /* no position of the sender yet */
+        const float *l = (const float *)(rp + RP_LOC);
+        return dist2(hero, l[0], l[1], l[2]) > trigger_r2(d);
+    }
+    return 0;
+}
+
 /* The world packets: WORLD_CHECKPOINT_LOAD is new and handled here (stored, run by the next frame); everything else goes to the original handler. */
 __attribute__((noinline, used))
 void my_WorldPacket(char *ch, i32 sender, u32 type, const u8 *data, i32 len)
@@ -729,6 +778,13 @@ void my_WorldPacket(char *ch, i32 sender, u32 type, const u8 *data, i32 len)
     if ((type & 0xff) == WORLD_ENEMY_ANIM) {
         enqueue_anim(d, sender, data, len);
         return;
+    }
+    if ((type & 0xff) == WORLD_TRIGGER_ACT && !(d[F_DISABLE / 4] & DISABLE_TRIGGER)) {
+        bump(d, F_CNT_TRIG_SEEN);
+        if (trigger_far(ib, d, sender)) {
+            bump(d, F_CNT_TRIG_DROPPED);
+            return;
+        }
     }
     if ((type & 0xff) != WORLD_CHECKPOINT_LOAD) {
         char *vt = *(char **)ch;

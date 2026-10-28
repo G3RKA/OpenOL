@@ -61,6 +61,11 @@ def main():
         off = int(cfg["section"]["data_offset"], 16)
         check("data-area-has-its-initial-content-and-follows-the-code", off >= len(code) and pn.read(cave + off, cfg["section"]["data_size"]) == apply_patch.data_init_bytes(cfg), f"data at +{off:#x}, {cfg['section']['data_size']} bytes")
         check("layout-fields-inside-the-data-area", all(0 <= v < cfg["section"]["data_size"] for v in cfg["layout"].values()))
+        sizes = {"rebroadcast_ctrl": 8, "last_ctrl": 8, "cmd_arg": 256, "follow_name": 128, "follow_persist": 128, "expect_name": 128, "persist_table": 512,
+                 "spawn_table": 64 * 24, "anim_ring": 4 * 0x200, "anim_state": 32 * 16}
+        spans = sorted((v, v + sizes.get(k, 4), k) for k, v in cfg["layout"].items())
+        clash = [(a[2], b[2]) for a, b in zip(spans, spans[1:]) if b[0] < a[1]]
+        check("layout-fields-do-not-overlap", not clash, f"{len(spans)} fields; overlaps: {clash}")
     check("size-of-image-covers-the-section", struct.unpack_from("<I", out, pn.opt + 56)[0] >= cave + sn[-1]["vs"])
 
     def refuses(label, d, c):

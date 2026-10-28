@@ -382,6 +382,11 @@ def group_d():
         ol.launch(2, "prison_persistent")
         cs = ol.clients()
         A, B = str(cs[0]["port"]), str(cs[1]["port"])
+        if _native_patch():
+            # this group is about SyncEnemies=False; the patch's shared checkpoint load (world packet 0x11) would reload each client when the other loads
+            import olmail
+            for c in cs:
+                olmail.set_disable(c["pid"], 4)
         for i in range(2):
             ol.cp(i, "Prison_OldCells_PreStruggle2")   # a map patient 956 units away, present on both clients
         time.sleep(10)
@@ -464,6 +469,10 @@ def group_f():
     A = str(ol.clients()[0]["port"])
     ol.cp(0, "Admin_MainHall")
     time.sleep(5)
+    if _native_patch():
+        # the late joiner's checkpoint load is announced (world packet 0x11) and A would follow it and drop its spawned soldier; the test is about the late join, so A does not follow
+        import olmail
+        olmail.set_disable(ol.clients()[0]["pid"], 4)
     off = tap_size()
     ol.spawn(0, attack=False)           # a calm enemy: an attacking one could kill the owner and delete itself before the late joiner arrives
     txt = tap_when(off, rf"C>R {A} ENEMY 0x01 SPAWN OLEnemy\w+", 20)

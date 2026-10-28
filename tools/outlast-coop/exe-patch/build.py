@@ -13,7 +13,7 @@ with open(hdr, "w") as h:                    # generated from sites.json so that
              "#define DATA_OFFSET " + hex(int(cfg["section"].get("data_offset", "0"), 16))]
     lines += ["#define F_" + k.upper() + " " + hex(v) for k, v in cfg.get("layout", {}).items()]
     h.write(chr(10).join(lines) + chr(10))
-subprocess.run(["gcc", "-O2", "-ffreestanding", "-fno-asynchronous-unwind-tables", "-fno-stack-protector", "-fno-ident", "-mno-avx", "-mno-red-zone",
+subprocess.run(["gcc", "-O2", "-ffreestanding", "-fno-tree-loop-distribute-patterns", "-fno-asynchronous-unwind-tables", "-fno-stack-protector", "-fno-ident", "-mno-avx", "-mno-red-zone",
                 "-I", HERE, "-c", src, "-o", obj], check=True)
 rel = subprocess.run(["objdump", "-r", obj], capture_output=True, text=True).stdout
 if "REL32" in rel or "ADDR64" in rel:
@@ -29,5 +29,7 @@ for s in cfg["sites"]:
         sys.exit(f"site {s['name']}: symbol {s['symbol']} is not in the object")
 blob = open(binf, "rb").read()
 json.dump({"entries": syms, "size": len(blob), "hex": blob.hex(), **cfg}, open(os.path.join(HERE, "olfix.json"), "w"), indent=1)
-os.remove(obj); os.remove(binf); os.remove(hdr)
+os.remove(binf)
+if "--keep" not in sys.argv:                  # --keep leaves olfix.o and olfix_layout.h for objdump
+    os.remove(obj); os.remove(hdr)
 print("built", len(blob), "bytes, entries", syms)

@@ -27,6 +27,10 @@ enemy stood in one place and both attacked. With the patch, when two copies of o
 client with the **lower player id** stays real; the other client destroys its own copy and keeps the puppet. Limits: two different enemies of the
 same class closer than 150 units can be merged by mistake; both players should use the patched exe.
 
+The same patch also carries: a checkpoint load on one client is followed by the others (shared checkpoint load), enemies that stand in an idle pose
+(waypoint animations such as the cage shaker) play that pose on the other player's screen too, and a data area that the test scripts read and set from outside.
+Details, offsets and measurements: [exe-patch/README.md](exe-patch/README.md).
+
 ## Use (short)
 
 1. Copy your Outlast install (needs the Whistleblower DLC), install the OpenOL 2.1.0 release over the copy. Never touch the Steam folder itself.

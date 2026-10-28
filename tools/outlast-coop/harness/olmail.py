@@ -1,7 +1,7 @@
 """Host side of the patch's data area (see exe-patch/sites.json "layout"): read the counters and set the kill switch of a running client.
 
   python -I olmail.py <pid> [<pid> ...]                 print the data area of each client
-  python -I olmail.py <pid> disable one_owner|none      set or clear the one-owner kill switch (a twin without swapping exes)
+  python -I olmail.py <pid> disable one_owner|mailbox|shared_cp|anim|none|<mask>   set the kill switch bits (a twin without swapping exes; none clears all)
   python -I olmail.py <pid> load <checkpoint> [<persistent level>]   load a checkpoint through the patch's mailbox (no mouse, no overlay)
 
 The area is part of the patched exe's own section (writable); only these few u32 fields are ever written, from outside, by this tool.
@@ -70,7 +70,8 @@ if __name__ == "__main__":
     if len(a) >= 3 and a[1] == "load":
         print(send_load(int(a[0]), a[2], a[3] if len(a) > 3 else ""))
     elif len(a) == 3 and a[1] == "disable":
-        ok = set_disable(int(a[0]), {"one_owner": 1, "none": 0}[a[2]])
+        masks = {"one_owner": 1, "mailbox": 2, "shared_cp": 4, "anim": 8, "none": 0}
+        ok = set_disable(int(a[0]), masks[a[2]] if a[2] in masks else int(a[2], 0))     # a name, or a number: the OR of the bits
         print("written" if ok else "write failed")
     else:
         for pid in map(int, a):

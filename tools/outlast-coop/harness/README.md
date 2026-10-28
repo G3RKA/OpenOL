@@ -4,7 +4,7 @@ Small scripts used for the test runs in [../NOTES.md](../NOTES.md). They are gam
 test suite: they start clients, observe and inject, and print what they saw. Nothing here prints PASS/FAIL yet.
 
 **Safety:** point everything at a COPY of the game with OpenOL installed over it, and start clients with `-nosteam`
-(done by `ol.py`). The owner's install, Steam Cloud saves and profile must never be touched.
+(done by `ol.py`). The player's own install, Steam Cloud saves and profile must never be touched.
 
 ## The suite
 
@@ -38,6 +38,20 @@ the table in [../README.md](../README.md#qa). It needs `OL_GAME_DIR`, `OL_LOG_DI
 | `ol.py` | One-command scenario driver: `up` (relay + proxy), `launch N <map>` (clients straight on a map, window wake, tiling, proxy port per client), `cp <idx> <checkpoint>` / `cpall` (checkpoint through the F6 overlay search box), `survey` (hero spawn and enemies per checkpoint), `embedded <idx> <port>` (start the relay built into the exe from the overlay), `up` also takes `relay=False` in code, `maxhp <idx> <n>` (Max Health slider), `spawn <idx>` (Soldier at the hero's feet; `attack=False` in code switches the overlay's Should Attack off), `launch N <map>` appends with `append=True` in code, `nudge <idx>` (short step), `level <idx>` (level the camera pitch), `status`, `down`. Environment: `OL_GAME_DIR`, `OL_LOG_DIR`, `OL_RELAY_EXE`, `OL_RELAY_ARGS` (extra relay arguments), `OL_UPSTREAM_RELAY_EXE` (group P twins; default `OpenOL_Relay.exe` next to the scripts), `OL_PATCHED_RELAY_EXE` (suite groups B and P: the relay built with both patches in `../relay-patches/`; default `OpenOL_Relay_patched.exe` next to the scripts, without it B3 is scored as the known upstream bug). The overlay click offsets assume the default overlay layout in a 816x639 window. Leave the overlay closed between calls. |
 | `olwin.py` | Window helper: list, focus, `wake` (a client started from a background shell hangs in engine init after the Wwise log line until its window is minimized and restored), real key presses via `SendInput` (the game ignores posted key messages) |
 | `goto.py`, `turn.py`, `look.py`, `hold.py`, `click.py`, `setslider.py` | Walk to x,y using the proxy's hero state with stuck detection (progress toward the target, escalating detours, `BLOCKED`, `HIT`, `STALE`), closed-loop turning, mouse look, key hold, click, ImGui slider values |
+
+## Hands-free tests (need the patched exe; no mouse, no keyboard)
+
+The patched exe has a data area that a test reads and writes from outside (`olmail.py`: counters, kill switches, a command mailbox that loads a checkpoint from the game thread). These scripts use it and the
+game's memory (read-only) instead of the overlay and the desktop:
+
+| File | What it does |
+|---|---|
+| `olmail.py` | `python -I olmail.py <pid>` prints the data area; `... disable one_owner\|mailbox\|shared_cp\|anim\|none\|<mask>` sets kill-switch bits; `... load <checkpoint> [<persistent level>]` loads a checkpoint through the mailbox. |
+| `mailbox_live.py` | Two clients, a checkpoint load through the mailbox: it answers, the hero moves to the checkpoint, both clients stay alive. |
+| `shared_cp_live.py` | The shared checkpoint load: a load on one client is followed by the other, no echo back, switched off on the receiver it does not follow, both alive. |
+| `sweep.py <Group> [--map <persistent map>]` | Loads every checkpoint of a group on both clients, one after the other, and checks: the load applied, no hang (hero stream silent), no crash box, equal enemy counts, no enemy simulated twice. |
+| `probe_positions.py <checkpoint> [<checkpoint before>\|-] [<seconds between loads>]` | Enemy and puppet positions per second on both clients and the merge counters. |
+| `probe_anim.py <checkpoint>... [--disable 8]` | Enemy animations, owner against puppet, per second (`Bot->bAnimating`, `bIsAnimatingFullBody`, the animation name, the puppet's animation sets) and the `cnt_anim_*` counters; `--disable 8` is the twin with the feature off. |
 
 ## Typical run
 

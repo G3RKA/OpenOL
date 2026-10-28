@@ -24,12 +24,17 @@ typedef int i32;
 typedef unsigned int u32;
 typedef unsigned char u8;
 
+#ifdef OLFIX_HOST_TEST            /* hosttest.c: a fake image instead of the PEB; never defined for the real build */
+extern char *test_ib(void);
+static inline char *IB(void) { return test_ib(); }
+#else
 static inline char *IB(void)
 {
     char *p;
     __asm__ volatile("movq %%gs:0x60, %0\n\tmovq 0x10(%0), %0" : "=r"(p));
     return p;
 }
+#endif
 
 
 /* The data area (a zeroed, writable part of the same section): a kill switch per feature that a test can set from outside, and counters it can read. */
@@ -37,11 +42,12 @@ static inline char *IB(void)
 #define DISABLE_ONE_OWNER 1u
 #define DISABLE_MAILBOX   2u
 #define DISABLE_SHARED_CP 4u
+#define DISABLE_ANIM      8u
 static inline volatile u32 *data_area(char *ib)
 {
     volatile u32 *d = (volatile u32 *)(ib + CAVE_RVA + DATA_OFFSET);
     if (d[F_MAGIC / 4] == 0) {
-        d[F_VERSION / 4] = 2;
+        d[F_VERSION / 4] = 5;
         d[F_MAGIC / 4] = OLFX_MAGIC;
     }
     return d;
@@ -113,6 +119,270 @@ static inline float dist2(const char *e, float x, float y, float z)
     return dx * dx + dy * dy + dz * dz;
 }
 
+/* Where an actor was first seen (own enemy: its first announcement; puppet: its creation). Enemies walk away from where they appeared, and the
+   two copies of one enemy can appear seconds apart; comparing first-seen places keeps the merge working after that drift. */
+#define SPAWN_N 64
+struct seen { char *actor; float x, y, z; u32 cls; };
+
+static volatile struct seen *first_seen(volatile u32 *d, char *a)
+{
+    volatile struct seen *t = (volatile struct seen *)((volatile char *)d + F_SPAWN_TABLE);
+    u32 cls = (u32)(unsigned long long)*(void **)(a + OBJ_CLASS);
+    i32 free_i = -1;
+    for (i32 i = 0; i < SPAWN_N; i++) {
+        if (t[i].actor == a && t[i].cls == cls)
+            return &t[i];
+        if (free_i < 0 && (!t[i].actor || !alive(t[i].actor)))
+            free_i = i;
+    }
+    if (free_i < 0)
+        free_i = (i32)(((unsigned long long)a >> 4) % SPAWN_N);       /* full: reuse a slot */
+    t[free_i].actor = a;
+    t[free_i].x = *(float *)(a + ACTOR_LOC);
+    t[free_i].y = *(float *)(a + ACTOR_LOC + 4);
+    t[free_i].z = *(float *)(a + ACTOR_LOC + 8);
+    t[free_i].cls = cls;
+    return &t[free_i];
+}
+
+static inline float seen_dist2(volatile struct seen *p, volatile struct seen *q)
+{
+    float dx = p->x - q->x, dy = p->y - q->y, dz = p->z - q->z;
+    return dx * dx + dy * dy + dz * dz;
+}
+
+static void clear_seen(volatile u32 *d)
+{
+    volatile struct seen *t = (volatile struct seen *)((volatile char *)d + F_SPAWN_TABLE);
+    for (i32 i = 0; i < SPAWN_N; i++)
+        t[i].actor = 0;
+}
+
+/* ---- enemy animations ------------------------------------------------------------------------------------------------------------------------
+   An AI enemy that stands on a waypoint (or runs a behaviour-tree play-animation task) plays its animation through the SCRIPT function
+   OLEnemyPawn.PlayFullBodyAnim. The wire carries only Bot->bAnimating (bit 4 of the LOC flags), so the puppet of that enemy never starts the animation;
+   with the one-owner rule the second player has only the puppet. The owner now announces the animation name, the puppet runs the same script function.
+   Sender : my_SendSpawn sees, once per own enemy and tick, Bot->bAnimating together with pawn->bIsAnimatingFullBody (the script sets it when the
+            animation really started) and announces Bot->CurrentAnimation once per episode: WORLD type 0x12.
+   Receiver: my_WorldPacket queues the packet, my_Tick (game thread, outside the network poll) calls the script function on the puppet through
+            ProcessEvent. The LOC code of the game already stops the puppet's animation when the owner's bAnimating drops. */
+#define RVA_GETNAME       0x0073830   /* FString UObject::GetName() const : rcx = object, rdx = FString* result */
+#define RVA_NAME_TOSTRING 0x01b7480   /* FString FName::ToString() const : rcx = FName*, rdx = FString* result */
+#define RVA_NAME_CTOR     0x0187660   /* FName::FName(const TCHAR*, EFindName = FNAME_Add (1)) : rcx = FName*, rdx = wide string, r8d = 1 */
+#define RVA_FINDFUNC      0x01925a0   /* UFunction* UObject::FindFunctionChecked(FName) : rcx = object, rdx = FName by value */
+#define VT_PROCESSEVENT   0x218       /* UObject::ProcessEvent(UFunction*, void* parms, void* result) */
+#define PAWN_BOT          0x2bd8      /* AOLEnemyPawn::Bot */
+#define PAWN_FLAGS        0x2bf8      /* bit 0x10 = bIsAnimatingFullBody */
+#define PAWN_SLOT         0x794       /* AOLEnemyPawn::FullBodyAnimSlot */
+#define BOT_FLAGS         0x4bc       /* AOLBot bitfield dword: bit 14 = bAnimating */
+#define BOT_CURANIM       0x618       /* AOLBot::CurrentAnimation (FAnimationData): FName +0, flags (bit 0 loop) +8, then float bits rate, blendIn, blendOut, start, end */
+#define WORLD_ENEMY_ANIM  0x12        /* new: [enemyLen][enemy ASCII][animLen][anim ASCII][flags][rate][blendIn][blendOut][start][end] (float bits, little endian) */
+#define ANIM_N            32
+#define ANIM_REFRESH_CALLS 512        /* calls of anim_edge for one enemy (one per send tick) between two announcements of the same running animation */
+
+struct fstr { unsigned short *data; i32 num; i32 max; };
+struct astate { char *actor; u32 lo, hi, pad; };
+struct aq { u32 valid; i32 sender; u32 flags; u32 f[5]; u32 pad[4]; char enemy[64]; char anim[64]; };
+
+static int same_name(const volatile char *a, const unsigned short *w, i32 wn);
+
+/* A puppet is spawned from its class alone, so it lacks the animation sets the level gives to the real enemy when it spawns it
+   (UActorFactoryOLAI::AdditionalAnimSets, appended to the pawn's SpawnerAnimSets; the scripted animations SE_AI_* live in them): the script then logs
+   "PlayCustomAnim <name>, Animation Not Found!!". When our own copy of the same enemy is dropped in favour of the puppet, it hands its sets over first. */
+#define PAWN_SPAWNER_SETS  0x2d7c     /* AOLEnemyPawn::SpawnerAnimSets (TArray<UAnimSet*>: data +0, num +8, max +12) */
+#define VT_ADDANIMSETS     0x738      /* OLPawn::AddAnimSets(const TArray<UAnimSet*>&) */
+#define RVA_APPREALLOC     0x0beac0   /* void *appRealloc(void *old, u32 bytes, u32 align) */
+static void transfer_animsets(char *ib, char *from, char *to)
+{
+    if (!from || !to || from == to)
+        return;
+    char *src = from + PAWN_SPAWNER_SETS, *dst = to + PAWN_SPAWNER_SETS;
+    i32 n = *(i32 *)(src + 8);
+    void **sets = *(void ***)src;
+    if (n <= 0 || n > 64 || !sets)
+        return;
+    if (*(i32 *)(dst + 8) == 0) {                     /* the puppet keeps its own list too, so a later rebuild of its animation sets still includes them */
+        void **buf = ((void **(*)(void *, u32, u32))(ib + RVA_APPREALLOC))(0, (u32)n * 8u, 8u);
+        if (buf) {
+            for (i32 i = 0; i < n; i++)
+                buf[i] = sets[i];
+            *(void ***)dst = buf;
+            *(i32 *)(dst + 8) = n;
+            *(i32 *)(dst + 12) = n;
+        }
+    }
+    char *vt = *(char **)to;
+    ((void (*)(char *, void *))*(void **)(vt + VT_ADDANIMSETS))(to, src);
+}
+
+static i32 fstr_ascii(const struct fstr *s, char *dst, i32 max)
+{
+    i32 n = 0;
+    if (!s->data)
+        return 0;
+    for (; n < s->num - 1 && n < max; n++) {
+        unsigned short c = s->data[n];
+        dst[n] = (char)(c < 128 ? c : '?');
+    }
+    return n;
+}
+
+static void put_u32(char *p, u32 v)
+{
+    p[0] = (char)v; p[1] = (char)(v >> 8); p[2] = (char)(v >> 16); p[3] = (char)(v >> 24);
+}
+
+/* The owner side: announce the animation of one own enemy when it starts. */
+static void anim_edge(char *ib, volatile u32 *d, char *e)
+{
+    if ((d[F_DISABLE / 4] & DISABLE_ANIM) || !e || !alive(e))
+        return;
+    char *conn = ib + RVA_GMPCONN;
+    if (!*(i32 *)(conn + 0x30) || !*(i32 *)(conn + 0x34))
+        return;
+    char *bot = *(char **)(e + PAWN_BOT);
+    if (!bot)
+        return;
+    volatile struct astate *t = (volatile struct astate *)((volatile char *)d + F_ANIM_STATE);
+    i32 si = -1, fr = -1;
+    for (i32 i = 0; i < ANIM_N; i++) {
+        if (t[i].actor == e) { si = i; break; }
+        if (fr < 0 && (!t[i].actor || !alive(t[i].actor)))
+            fr = i;
+    }
+    if (si < 0) {
+        si = fr >= 0 ? fr : (i32)(((unsigned long long)e >> 4) % ANIM_N);
+        t[si].actor = e;
+        t[si].lo = 0;
+        t[si].hi = 0;
+    }
+    int on = (*(u32 *)(bot + BOT_FLAGS) & 0x4000u) && (*(u32 *)(e + PAWN_FLAGS) & 0x10u);
+    u32 lo = *(u32 *)(bot + BOT_CURANIM), hi = *(u32 *)(bot + BOT_CURANIM + 4);
+    if (!on) {                                       /* no animation now: the next one is a new episode */
+        t[si].lo = 0;
+        t[si].hi = 0;
+        return;
+    }
+    if (!lo && !hi)
+        return;                                      /* nothing named */
+    u32 refresh = 0;
+    if (t[si].lo == lo && t[si].hi == hi) {
+        if (++t[si].pad < ANIM_REFRESH_CALLS)
+            return;                                  /* this one is already announced */
+        refresh = 2;                                 /* a long animation: say it again now and then, for a partner who joined or reconnected meanwhile */
+    }
+    t[si].pad = 0;
+    t[si].lo = lo;
+    t[si].hi = hi;
+    struct fstr en, an;
+    ((void *(*)(void *, void *))(ib + RVA_GETNAME))(e, &en);
+    ((void *(*)(void *, void *))(ib + RVA_NAME_TOSTRING))(bot + BOT_CURANIM, &an);
+    char buf[2 + 1 + 63 + 1 + 63 + 1 + 20];
+    i32 k = 0;
+    buf[k++] = CH_WORLD;
+    buf[k++] = WORLD_ENEMY_ANIM;
+    i32 nl = fstr_ascii(&en, buf + k + 1, 63);
+    buf[k++] = (char)nl;
+    k += nl;
+    i32 al = fstr_ascii(&an, buf + k + 1, 63);
+    buf[k++] = (char)al;
+    k += al;
+    buf[k++] = (char)((*(u32 *)(bot + BOT_CURANIM + 8) & 1u) | refresh);        /* bit 0 loop, bit 1 refresh (the puppet skips it while it already animates) */
+    for (i32 j = 0; j < 5; j++) {                    /* rate, blendIn, blendOut, start, end: raw float bits, no arithmetic */
+        put_u32(buf + k, *(u32 *)(bot + BOT_CURANIM + 12 + 4 * j));
+        k += 4;
+    }
+    if (en.data)
+        ((void (*)(void *))(ib + RVA_APPFREE))(en.data);
+    if (an.data)
+        ((void (*)(void *))(ib + RVA_APPFREE))(an.data);
+    if (nl > 0 && al > 0) {
+        ((void (*)(void *, const char *, i32))(ib + RVA_SENDBINARY))(conn, buf, k);
+        bump(d, F_CNT_ANIM_SENT);
+    }
+}
+
+/* The puppet side: queue a received animation (the network poll must not run script). */
+static void enqueue_anim(volatile u32 *d, i32 sender, const u8 *data, i32 len)
+{
+    bump(d, F_CNT_ANIM_RECV);
+    if ((d[F_DISABLE / 4] & DISABLE_ANIM) || !data || len < 3)
+        return;
+    i32 nl = data[0];
+    if (nl == 0 || nl > 63 || 1 + nl + 1 > len)
+        return;
+    i32 al = data[1 + nl];
+    if (al == 0 || al > 63 || 2 + nl + al + 1 + 20 > len)
+        return;
+    i32 o = 2 + nl + al;
+    volatile struct aq *q = (volatile struct aq *)((volatile char *)d + F_ANIM_RING) + (d[F_ANIM_WR / 4]++ & 3u);
+    q->valid = 0;
+    q->sender = sender;
+    q->flags = data[o];
+    for (i32 j = 0; j < 5; j++) {
+        const u8 *p = data + o + 1 + 4 * j;
+        q->f[j] = (u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16) | ((u32)p[3] << 24);
+    }
+    for (i32 i = 0; i < nl; i++) q->enemy[i] = (char)data[1 + i];
+    q->enemy[nl] = 0;
+    for (i32 i = 0; i < al; i++) q->anim[i] = (char)data[2 + nl + i];
+    q->anim[al] = 0;
+    q->valid = 1;
+}
+
+/* Run the script function OLEnemyPawn.PlayFullBodyAnim on the puppet: it sets bIsAnimatingFullBody and LastPlayedAnim like the real enemy does. */
+static void play_anim(char *ib, volatile u32 *d, char *pc, volatile struct aq *q)
+{
+    char *rem = *(char **)(pc + CTRL_REMOTE);
+    i32 n = *(i32 *)(pc + CTRL_REMOTE + 8);
+    char *dummy = 0;
+    for (i32 i = 0; rem && i < n; i++) {
+        char *r = rem + (long long)i * REMOTE_STRIDE;
+        const unsigned short *w = *(const unsigned short **)r;      /* FRemoteEnemyState::NetName (FString: data, num) */
+        i32 wn = *(i32 *)(r + 8);
+        if (*(i32 *)(r + REMOTE_OWNER) != q->sender || !w || wn <= 1 || !same_name(q->enemy, w, wn))
+            continue;
+        dummy = *(char **)(r + REMOTE_DUMMY);
+        break;
+    }
+    if (!dummy || !alive(dummy) || !*(char **)(dummy + PAWN_SLOT)) {
+        bump(d, F_CNT_ANIM_DROPPED);
+        return;
+    }
+    if ((q->flags & 2u) && (*(u32 *)(dummy + PAWN_FLAGS) & 0x10u))
+        return;                                      /* a refresh while the puppet already animates: nothing to do (no restart) */
+    unsigned short w[64];
+    i32 k = 0;
+    for (; k < 63 && q->anim[k]; k++)
+        w[k] = (unsigned char)q->anim[k];
+    w[k] = 0;
+    u32 an[2];
+    an[0] = 0; an[1] = 0;
+    ((void (*)(u32 *, const unsigned short *, i32))(ib + RVA_NAME_CTOR))(an, w, 1);
+    volatile unsigned long long fnw[5];              /* L"PlayFullBodyAnim" built from immediates (volatile: otherwise the compiler loads the four words from .rdata, a relocation) */
+    fnw[0] = 0x00790061006C0050ull;
+    fnw[1] = 0x006C006C00750046ull;
+    fnw[2] = 0x00790064006F0042ull;
+    fnw[3] = 0x006D0069006E0041ull;
+    fnw[4] = 0;
+    u32 pf[2];
+    pf[0] = 0; pf[1] = 0;
+    ((void (*)(u32 *, const unsigned short *, i32))(ib + RVA_NAME_CTOR))(pf, (const unsigned short *)(unsigned long long)fnw, 1);
+    char *func = ((char *(*)(char *, unsigned long long))(ib + RVA_FINDFUNC))(dummy, ((unsigned long long)pf[1] << 32) | pf[0]);
+    if (!func || (!an[0] && !an[1])) {
+        bump(d, F_CNT_ANIM_DROPPED);
+        return;
+    }
+    u32 parm[8];                                     /* OLEnemyPawn.PlayFullBodyAnim(name, rate, blendIn, blendOut, bLooping, start, end) */
+    parm[0] = an[0]; parm[1] = an[1];
+    parm[2] = q->f[0]; parm[3] = q->f[1]; parm[4] = q->f[2];
+    parm[5] = q->flags & 1u;
+    parm[6] = q->f[3]; parm[7] = q->f[4];
+    char *vt = *(char **)dummy;
+    ((void (*)(char *, char *, void *, void *))*(void **)(vt + VT_PROCESSEVENT))(dummy, func, parm, 0);
+    bump(d, F_CNT_ANIM_PLAYED);
+}
+
 __attribute__((noinline, used))
 void my_ApplySpawn(char *ch, i32 sender, void *name, void *cls, float x, float y, float z, i32 yaw, void *mesh, i32 weapon, i32 has_color,
                    float cr, float cg, float cb, float ca)
@@ -121,6 +391,8 @@ void my_ApplySpawn(char *ch, i32 sender, void *name, void *cls, float x, float y
     volatile u32 *d0 = data_area(ib);
     bump(d0, F_CNT_APPLY_CALLS);
     char *ctrl = ch ? *(char **)(ch + CH_CONTROLLER) : 0;
+    if (ctrl)
+        *(char *volatile *)((volatile char *)d0 + F_LAST_CTRL) = ctrl;
     i32 n0 = ctrl ? *(i32 *)(ctrl + CTRL_REMOTE + 8) : 0;
     ((ApplySpawnFn)(ib + RVA_APPLYSPAWN))(ch, sender, name, cls, x, y, z, yaw, mesh, weapon, has_color, cr, cg, cb, ca);
     if ((d0[F_DISABLE / 4] & DISABLE_ONE_OWNER) || !ctrl || !*(i32 *)(ib + RVA_SYNCENEMIES))
@@ -129,21 +401,25 @@ void my_ApplySpawn(char *ch, i32 sender, void *name, void *cls, float x, float y
     if (n1 <= n0)
         return;                                   /* the original ignored the packet (already known) */
     char *r = *(char **)(ctrl + CTRL_REMOTE) + (long long)(n1 - 1) * REMOTE_STRIDE;
-    char *d = *(char **)(r + REMOTE_DUMMY);       /* the puppet the original just made */
+    char *d = *(char **)(r + REMOTE_DUMMY);       /* the puppet the original just made, at the place the sender announced */
     if (!d)
         return;
+    volatile struct seen *sd = first_seen(d0, d);
     char **arr = *(char ***)(ctrl + CTRL_CACHED);
     i32 n = *(i32 *)(ctrl + CTRL_CACHED + 8);
     for (i32 i = 0; arr && i < n; i++) {
         char *e = arr[i];
-        if (!e || e == d || !alive(e) || *(void **)(e + OBJ_CLASS) != *(void **)(d + OBJ_CLASS) || dist2(e, *(float *)(d + ACTOR_LOC), *(float *)(d + ACTOR_LOC + 4), *(float *)(d + ACTOR_LOC + 8)) >= same_place_sq())
+        if (!e || e == d || !alive(e) || *(void **)(e + OBJ_CLASS) != *(void **)(d + OBJ_CLASS))
             continue;
+        if (seen_dist2(first_seen(d0, e), sd) >= same_place_sq() && dist2(e, sd->x, sd->y, sd->z) >= same_place_sq())
+            continue;                             /* neither where ours first appeared nor where it is now */
         if (sender > *(i32 *)(ib + RVA_LOCALPLAYERID)) {
             *(char **)(r + REMOTE_DUMMY) = 0;     /* ours is the real one: no puppet of the sender's copy */
             destroy_actor(ib, d);
             bump(d0, F_CNT_PUPPET_DESTROYED);
             *(char *volatile *)((volatile char *)d0 + F_REBROADCAST_CTRL) = ctrl;   /* the sender may have missed our announcement while it loaded: announce again */
         } else {
+            transfer_animsets(ib, e, d);          /* the puppet gets the animation sets of the copy that goes */
             destroy_actor(ib, e);                 /* the sender's is the real one: drop our copy, keep the puppet */
             bump(d0, F_CNT_OWN_DESTROYED);
         }
@@ -158,16 +434,22 @@ void my_SendSpawn(char *ch, char *e)
     volatile u32 *d0 = data_area(ib);
     bump(d0, F_CNT_SEND_CALLS);
     char *ctrl = ch ? *(char **)(ch + CH_CONTROLLER) : 0;
+    if (ctrl)
+        *(char *volatile *)((volatile char *)d0 + F_LAST_CTRL) = ctrl;
     if (!(d0[F_DISABLE / 4] & DISABLE_ONE_OWNER) && ctrl && e && *(i32 *)(ib + RVA_SYNCENEMIES)) {
         char *rem = *(char **)(ctrl + CTRL_REMOTE);
         i32 n = *(i32 *)(ctrl + CTRL_REMOTE + 8);
+        volatile struct seen *se = first_seen(d0, e);
         float x = *(float *)(e + ACTOR_LOC), y = *(float *)(e + ACTOR_LOC + 4), z = *(float *)(e + ACTOR_LOC + 8);
         for (i32 i = 0; rem && i < n; i++) {
             char *r = rem + (long long)i * REMOTE_STRIDE;
             char *d = *(char **)(r + REMOTE_DUMMY);
-            if (!d || *(void **)(d + OBJ_CLASS) != *(void **)(e + OBJ_CLASS) || dist2(d, x, y, z) >= same_place_sq())
+            if (!d || *(void **)(d + OBJ_CLASS) != *(void **)(e + OBJ_CLASS))
                 continue;
+            if (seen_dist2(first_seen(d0, d), se) >= same_place_sq() && dist2(d, x, y, z) >= same_place_sq())
+                continue;                    /* neither the places they first appeared nor where they are now */
             if (*(i32 *)(r + REMOTE_OWNER) < *(i32 *)(ib + RVA_LOCALPLAYERID)) {
+                transfer_animsets(ib, e, d);  /* the puppet gets the animation sets of the copy that goes */
                 destroy_actor(ib, e);        /* a lower id owns this enemy: ours is the duplicate */
                 bump(d0, F_CNT_OWN_DESTROYED);
                 return;
@@ -179,9 +461,22 @@ void my_SendSpawn(char *ch, char *e)
             break;
         }
     }
-    /* the original SendSpawn, found through the vtable the patched call site no longer reads */
+    /* the original SendSpawn, found through the vtable the patched call site no longer reads. It announces E->Location; for the one-owner rule the
+       partner must get the place where E first appeared (a re-announcement can come long after E walked away), so the location is swapped for the
+       duration of the call only. Nothing else runs in between: the call just reads the actor into a packet. */
     char *vt = *(char **)ch;
+    if (e && !(d0[F_DISABLE / 4] & DISABLE_ONE_OWNER) && alive(e)) {
+        volatile struct seen *fs = first_seen(d0, e);
+        float *loc = (float *)(e + ACTOR_LOC);
+        float ox = loc[0], oy = loc[1], oz = loc[2];
+        loc[0] = fs->x; loc[1] = fs->y; loc[2] = fs->z;
+        (*(SendSpawnFn *)(vt + 0x268))(ch, e);
+        loc[0] = ox; loc[1] = oy; loc[2] = oz;
+        anim_edge(ib, d0, e);
+        return;
+    }
     (*(SendSpawnFn *)(vt + 0x268))(ch, e);
+    anim_edge(ib, d0, e);
 }
 
 typedef i32 (*TickFn)(char *, float, i32);
@@ -245,6 +540,16 @@ i32 my_Tick(char *pc, float dt, i32 type)
             bump(d, F_CNT_REBROADCAST);
         }
     }
+    if (pc && *(char *volatile *)((volatile char *)d + F_LAST_CTRL) == pc) {   /* queued enemy animations: only for the controller the enemy hooks saw */
+        volatile struct aq *ring = (volatile struct aq *)((volatile char *)d + F_ANIM_RING);
+        for (i32 i = 0; i < 4; i++) {
+            if (ring[i].valid) {
+                ring[i].valid = 0;
+                if (!(d[F_DISABLE / 4] & DISABLE_ANIM) && *(i32 *)(ib + RVA_SYNCENEMIES))
+                    play_anim(ib, d, pc, &ring[i]);
+            }
+        }
+    }
     if (d[F_FOLLOW_PENDING / 4]) {                                       /* a partner loaded a checkpoint: do the same here */
         d[F_FOLLOW_PENDING / 4] = 0;
         if (!(d[F_DISABLE / 4] & DISABLE_SHARED_CP)) {
@@ -291,6 +596,7 @@ void my_SNGAC(char *pc, void *fname, i32 bsave)
     volatile u32 *d = data_area(ib);
     char *hero = pc ? *(char **)(pc + PC_HEROPAWN) : 0;
     int dying = hero && *(i32 *)(hero + PAWN_HEALTH) <= 0;
+    clear_seen(d);                                   /* a new load: the enemies and puppets of the old world are gone */
     ((SNGACFn)(ib + RVA_SNGAC))(pc, fname, bsave);
     const unsigned short *w = fname ? *(const unsigned short **)fname : 0;
     i32 wn = fname ? *(i32 *)((char *)fname + 8) : 0;
@@ -335,6 +641,10 @@ void my_WorldPacket(char *ch, i32 sender, u32 type, const u8 *data, i32 len)
 {
     char *ib = IB();
     volatile u32 *d = data_area(ib);
+    if ((type & 0xff) == WORLD_ENEMY_ANIM) {
+        enqueue_anim(d, sender, data, len);
+        return;
+    }
     if ((type & 0xff) != WORLD_CHECKPOINT_LOAD) {
         char *vt = *(char **)ch;
         (*(WorldPacketFn *)(vt + 0x298))(ch, sender, type, data, len);

@@ -19,6 +19,7 @@ and the upstream relay must both pass), so a regression in any relay build shows
   S11 a player's last HERO_STATE and last MATINEE_STATE are replayed to a late joiner (the last one, not the first)
   S12 after the owner of a hero/matinee snapshot leaves, a later joiner no longer gets that player's hero snapshot, but still gets the pickups (room state)
   S13 twin: the blind mirror gives a late joiner nothing, so S9's replay expectation fails on it
+  S14 the exe patch's world packets 0x11 (shared checkpoint load) and 0x12 (enemy animation) are relayed unchanged, not echoed to the sender, not replayed to a late joiner
 """
 import os
 import socket
@@ -222,6 +223,27 @@ def pickups():
     return P1, P2, P3
 
 
+def patch_world_types():
+    """The exe patch's own world packets (0x11 shared checkpoint load, 0x12 enemy animation) are unknown to the relay: it must relay them unchanged
+    to the other player, must not echo them to the sender and must not replay them to a late joiner (they are events, not state)."""
+    P1, P2 = rf.Peer(), rf.Peer()
+    recv_all(P1, 0.3), recv_all(P2, 0.3)
+    name, anim = b"OLEnemyPatient_3", b"Idle_LeanWall"
+    ev = {0x11: bytes([len(b"Admin_MainHall")]) + b"Admin_MainHall" + bytes([len(b"AdminBlock_Persistent")]) + b"AdminBlock_Persistent",
+          0x12: bytes([len(name)]) + name + bytes([len(anim)]) + anim + b"\x01" + struct.pack("<fffff", 1.0, 0.2, 0.2, 0.0, 0.0)}
+    for t, payload in ev.items():
+        P1.send(CH_WORLD, t, payload)
+    got2 = {t: p for c, t, p in recv_all(P2, 0.8) if c == CH_WORLD and t in ev}
+    got1 = [t for c, t, _ in recv_all(P1, 0.3) if c == CH_WORLD and t in ev]
+    # the relay puts the sender's id after the type byte ([channel][type][player_id LE4][payload]); the payload must be unchanged
+    same = {t: len(p) >= 4 + len(ev[t]) and p[4:4 + len(ev[t])] == ev[t] for t, p in got2.items()}
+    check("S14.exe-patch-world-types-relayed-unchanged", set(got2) == set(ev) and all(same.values()), f"P2 got {sorted(got2)}, payload equal {same}")
+    check("S14b.exe-patch-world-types-not-echoed-to-the-sender", not got1, f"P1 got {got1}")
+    P3 = rf.Peer()
+    late = [t for c, t, _ in recv_all(P3, 1.2) if c == CH_WORLD and t in ev]
+    check("S14c.exe-patch-world-types-not-replayed-to-a-late-joiner", not late, f"late joiner got {late}")
+
+
 def player_snapshots():
     P1, P2 = rf.Peer(), rf.Peer()
     recv_all(P1, 0.3), recv_all(P2, 0.3)
@@ -290,6 +312,7 @@ def main():
     with_relay(exe, push_snapshots)
     mirror_twin()
     with_relay(exe, pickups)
+    with_relay(exe, patch_world_types)
     with_relay(exe, player_snapshots)
     mirror_join_twin()
     print(f"SUMMARY: {sum(results)}/{len(results)} -> {'PASS' if all(results) else 'FAIL'}", flush=True)

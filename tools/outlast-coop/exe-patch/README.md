@@ -9,7 +9,7 @@ Every client runs the AI of each map-placed enemy and sends it; every client tur
 `TickSend` and `ApplySpawn`). The patch adds one rule: when two copies of one enemy meet (same class, within 150 units), the copy of the client with
 the lower player id stays real; the other client destroys its own copy and keeps the puppet. Enemies that exist on one client only are not touched.
 
-Two call sites in the exe are redirected to `olfix.c` (about 1 KB of position independent code in a new section `.olfix`):
+The patch has grown since (see the sections below: data area, mailbox, shared checkpoint loads, enemy animations); it now redirects seven sites into about 6.6 KB of position independent code in a new section `.olfix`. The first two sites, the enemy rule:
 
 | Site (RVA) | Original | Hook | Rule |
 |---|---|---|---|
@@ -54,6 +54,31 @@ The section also carries a zeroed, writable data area (`sites.json` `layout`): a
 own enemies destroyed as duplicates, puppets destroyed). `harness/olmail.py` reads and sets them from outside with `ReadProcessMemory` and `WriteProcessMemory` on the game's
 own process, so a test switches the rule off and on **inside one run** instead of swapping the exe: `harness/twin_live.py` does it (rule on: one enemy in total, the merge counters
 move; rule off: every client has its own copy and a puppet, the original bug). Measured 2026-10-22: rule on `own [1, 0] puppets [0, 1]`, rule off `own [1, 1] puppets [1, 1]`.
+
+## Shared checkpoint loads and re-announcement (patches v4 and v5)
+
+A checkpoint load (menu New Game, the F6 overlay, the mailbox) is announced to the other clients as a new world packet, `WORLD_CHECKPOINT_LOAD` (0x11, name and persistent level); the receiving client runs the same
+load from its per-frame hook (a death restart on Insane difficulty is not shared, and a load that came from a partner is not sent back). Kill switch bit 2. When a client loaded after the other one had already announced its enemies,
+the owner announces them again (counter `cnt_rebroadcast`).
+
+## First-seen places (patch v6)
+
+The merge compares the places where the two copies first appeared, not only where they stand now, so a copy that walked away before the other one appeared is still recognised as the same enemy.
+
+## Enemy animations (patch v7)
+
+An AI enemy that stands on a waypoint plays its idle pose through the script function `OLEnemyPawn.PlayFullBodyAnim`; OpenOL sends only the flag "animating" (bit 4 of the `LOC` flags), so a puppet never started the animation,
+and with the one-owner rule the second player only has the puppet. v7 adds (kill switch bit 3):
+
+- the owning client reads `AOLBot::CurrentAnimation` (`Bot+0x618`) when the animation really started (`Bot` bit 14 and the pawn's `bIsAnimatingFullBody`) and sends a new world packet, type 0x12:
+  `[enemyLen][enemy][animLen][anim][flags: bit 0 loop, bit 1 refresh][rate][blendIn][blendOut][start][end]` (floats as raw bits; names as text, because name indexes differ between processes);
+  a long animation is repeated now and then for a client that joined or reconnected;
+- the receiving client queues it and its per-frame hook runs the same script function on the puppet through `ProcessEvent`; the game's own `LOC` code stops it when the flag drops;
+- the puppet is spawned from its class alone, so it lacks the animation sets the level hands to the real enemy at spawn (`AdditionalAnimSets`, where the `SE_AI_*` animations live; without them the log says
+  `PlayCustomAnim ..., Animation Not Found!!`). When our own copy is dropped in favour of the puppet it first hands its `SpawnerAnimSets` over (`AddAnimSets`).
+
+Measured 2026-10-28 with `harness/probe_anim.py` on two real clients: owner and puppet animate together (12 of 12 seconds on two prison checkpoints); counters `cnt_anim_sent`, `cnt_anim_recv`, `cnt_anim_played`, `cnt_anim_dropped`.
+`hosttest.py` (no game) builds `olfix.c` against a fake image and engine mocks and checks the packet bytes, the queue, the FName strings and the call parameters. An enemy that exists on one client only has no copy to take the sets from.
 
 ## Command mailbox (patch v3)
 

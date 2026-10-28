@@ -1,6 +1,6 @@
 """Enemy animations, owner against puppet, read-only from memory (no mouse, no keyboard). Needs the exe patch v7 (data area with the anim counters).
 
-  python -I probe_anim.py <checkpoint> [<checkpoint> ...] [--wait 8] [--seconds 25] [--disable 8]     (--disable 8 = the twin: animations switched off)
+  python -I probe_anim.py <checkpoint> [<checkpoint> ...] [--wait 8] [--seconds 25] [--disable 8|16]   (8 = the twin: animations off; 16 = no anim-set handover from the dropped copy, the puppet must look the sets up by path)
 
 Per checkpoint: both clients load it through the mailbox (one after the other, shared checkpoint off, like the sweep), then for every second:
   owner side  each own enemy: Bot->bAnimating (bot+0x4bc bit 14), pawn->bIsAnimatingFullBody (pawn+0x2bf8 bit 0x10), Bot->CurrentAnimation FName (bot+0x618: index, number)
@@ -101,7 +101,7 @@ def main():
         print(f"{cp}: seconds with an animating owner and an animating puppet: {both}", flush=True)
     for c in cs:
         m = olmail.read(c["pid"])
-        print("client", c["idx"], {k: m.get(k) for k in ("cnt_anim_sent", "cnt_anim_recv", "cnt_anim_played", "cnt_anim_dropped", "cnt_own_destroyed", "cnt_puppet_destroyed")}, flush=True)
+        print("client", c["idx"], {k: m.get(k) for k in ("cnt_anim_sent", "cnt_anim_recv", "cnt_anim_played", "cnt_anim_dropped", "cnt_anim_resolved", "cnt_own_destroyed", "cnt_puppet_destroyed")}, flush=True)
     ol.down()
 
 

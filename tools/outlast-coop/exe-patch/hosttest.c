@@ -55,6 +55,27 @@ static i32 mock_DestroyActor(void *world, char *actor, i32 a, i32 b) { (void)wor
 static void *mock_AppRealloc(void *old, u32 bytes, u32 align) { (void)align; return realloc(old, bytes); }
 static int addsets_calls, addsets_n; static char *addsets_to; static void *addsets_first;
 static void mock_AddAnimSets(char *pawn, char *tarray) { addsets_calls++; addsets_to = pawn; addsets_n = *(i32 *)(tarray + 8); addsets_first = **(void ***)tarray; }
+/* GetFullName of the two fake animation sets (0xA1, 0xA2): "<Class> <Package.Name>" */
+static void *mock_GetFullName(void *obj, void *out, void *stop)
+{
+    (void)stop;
+    return mock_FString((unsigned long long)obj == 0xA1 ? "AnimSet SE_Pkg.SetA" : "AnimSet SE_Pkg.SetB", (struct fstr *)out);
+}
+static char find_class_name[64]; static int find_calls; static void *find_first_class; static void *find_classarg[8]; static char find_names[8][80];
+#define FAKE_ANIMSET_CLASS ((void *)0xA5E7)
+static void *mock_FindObject(void *cls, void *outer, const unsigned short *name, i32 exact)
+{
+    (void)outer; (void)exact;
+    char s[80]; int i = 0;
+    for (; name[i] && i < 79; i++) s[i] = (char)name[i];
+    s[i] = 0;
+    int n = find_calls++ & 7;
+    find_classarg[n] = cls; strcpy(find_names[n], s);
+    if (strcmp(s, "Engine.AnimSet") == 0) { strcpy(find_class_name, s); find_first_class = cls; return FAKE_ANIMSET_CLASS; }
+    if (cls == FAKE_ANIMSET_CLASS && strcmp(s, "SE_Pkg.SetA") == 0) return (void *)0xB001;
+    if (cls == FAKE_ANIMSET_CLASS && strcmp(s, "SE_Pkg.SetB") == 0) return (void *)0xB002;
+    return 0;
+}
 
 static void tramp(unsigned rva, void *fn)       /* mov rax, imm64 ; jmp rax at ib + rva */
 {
@@ -69,6 +90,8 @@ int main(void)
     tramp(RVA_SENDBINARY, mock_SendBinary); tramp(RVA_APPFREE, mock_AppFree); tramp(RVA_GETNAME, mock_GetName);
     tramp(RVA_NAME_TOSTRING, mock_ToString); tramp(RVA_NAME_CTOR, mock_NameCtor); tramp(RVA_FINDFUNC, mock_FindFunc);
     tramp(RVA_TICK, mock_Tick); tramp(RVA_DESTROYACTOR, mock_DestroyActor); tramp(RVA_APPREALLOC, mock_AppRealloc);
+    tramp(RVA_GETFULLNAME, mock_GetFullName); tramp(RVA_FINDOBJ, mock_FindObject);
+    *(void **)(g_ib + RVA_CLASSCLASS) = (void *)0xC1A55;
     *(i32 *)(g_ib + RVA_SYNCENEMIES) = 1;
     *(i32 *)(g_ib + RVA_LOCALPLAYERID) = 2;
     *(i32 *)(g_ib + RVA_GMPCONN + 0x30) = 1;
@@ -79,6 +102,7 @@ int main(void)
     *(char **)ch = vt; *(char **)(ch + CH_CONTROLLER) = ctrl;
     *(void **)(vt + 0x268) = (void *)mock_SendSpawn;
     *(void **)(dvt + VT_PROCESSEVENT) = (void *)mock_ProcessEvent;
+    *(void **)(dvt + VT_ADDANIMSETS) = (void *)mock_AddAnimSets;
     *(char **)(pawn + OBJ_CLASS) = (char *)0x7000; *(i32 *)(pawn + PAWN_HEALTH) = 100;
     *(char **)(pawn + PAWN_BOT) = bot;
     *(u32 *)(bot + BOT_CURANIM) = 4242; *(u32 *)(bot + BOT_CURANIM + 4) = 0;
@@ -101,6 +125,7 @@ int main(void)
     want[k++] = 5; want[k++] = 0x12; want[k++] = 16; memcpy(want + k, "OLEnemyPatient_3", 16); k += 16;
     want[k++] = 13; memcpy(want + k, "Idle_LeanWall", 13); k += 13;
     want[k++] = 1; memcpy(want + k, f, 20); k += 20;
+    want[k++] = 0;                                                          /* no animation sets on this enemy yet */
     CHECK(sent_n == k && memcmp(sent, want, k) == 0, "packet length %d (want %d)", sent_n, k);
     unsigned char first[512]; int first_n = sent_n; memcpy(first, sent, sent_n);
     my_SendSpawn(ch, pawn);
@@ -114,6 +139,19 @@ int main(void)
     *(u32 *)(bot + BOT_FLAGS) = 0x4000;                                     /* ... and the next episode is announced again */
     my_SendSpawn(ch, pawn);
     CHECK(sent_count == 3 && (sent[2 + 1 + 16 + 1 + 13] & 2) == 0, "after a new episode: %d packets", sent_count);
+    /* an enemy that was given two animation sets announces their paths with a new episode (class word dropped) */
+    static void *sets0[2] = {(void *)0xA1, (void *)0xA2};
+    *(void ***)(pawn + PAWN_SPAWNER_SETS) = sets0; *(i32 *)(pawn + PAWN_SPAWNER_SETS + 8) = 2; *(i32 *)(pawn + PAWN_SPAWNER_SETS + 12) = 2;
+    *(u32 *)(bot + BOT_FLAGS) = 0; my_SendSpawn(ch, pawn); *(u32 *)(bot + BOT_FLAGS) = 0x4000; my_SendSpawn(ch, pawn);
+    int so = 2 + 1 + 16 + 1 + 13 + 1 + 20;
+    CHECK(sent_count == 4 && sent[so] == 2 && sent[so + 1] == 11 && memcmp(sent + so + 2, "SE_Pkg.SetA", 11) == 0 && sent[so + 13] == 11 && memcmp(sent + so + 14, "SE_Pkg.SetB", 11) == 0 && sent_n == so + 25,
+          "sets in the packet: count %d, length %d (want %d)", sent[so], sent_n, so + 25);
+    unsigned char with_sets[512]; int with_sets_n = sent_n; memcpy(with_sets, sent, sent_n);
+    for (int i = 0; i < ANIM_REFRESH_CALLS + 1; i++) my_SendSpawn(ch, pawn);
+    CHECK(sent_count == 5 && sent[so] == 0 && sent_n == so + 1, "a refresh carries no sets: count %d length %d", sent[so], sent_n);
+    *(void ***)(pawn + PAWN_SPAWNER_SETS) = 0; *(i32 *)(pawn + PAWN_SPAWNER_SETS + 8) = 0; *(i32 *)(pawn + PAWN_SPAWNER_SETS + 12) = 0;
+    *(u32 *)(bot + BOT_FLAGS) = 0; my_SendSpawn(ch, pawn); *(u32 *)(bot + BOT_FLAGS) = 0x4000; my_SendSpawn(ch, pawn);
+    sent_count = 3;
     d[F_DISABLE / 4] = DISABLE_ANIM;
     *(u32 *)(bot + BOT_FLAGS) = 0; my_SendSpawn(ch, pawn); *(u32 *)(bot + BOT_FLAGS) = 0x4000;
     my_SendSpawn(ch, pawn);
@@ -172,6 +210,21 @@ int main(void)
     CHECK(pe_calls == 2, "another controller played the queue");
     my_Tick(ctrl, 0.016f, 0);
     CHECK(pe_calls == 3, "the queued entry was lost (%d)", pe_calls);
+
+    /* ---- a puppet without animation sets (no twin handed any over) finds them by the owner's paths ---- */
+    *(char **)(dummy + OBJ_CLASS) = (char *)0x7000;
+    my_WorldPacket(ch, 1, 0x12, with_sets + 2, with_sets_n - 2); my_Tick(ctrl, 0.016f, 0);
+    CHECK(strcmp(find_class_name, "Engine.AnimSet") == 0 && find_first_class == (void *)0xC1A55, "class lookup '%s' with class arg %p", find_class_name, find_first_class);
+    CHECK(strcmp(find_names[1], "SE_Pkg.SetA") == 0 && strcmp(find_names[2], "SE_Pkg.SetB") == 0 && find_classarg[1] == FAKE_ANIMSET_CLASS, "set lookups '%s' '%s'", find_names[1], find_names[2]);
+    void **got = *(void ***)(dummy + PAWN_SPAWNER_SETS);
+    CHECK(addsets_calls == 1 && addsets_to == dummy && addsets_n == 2 && addsets_first == (void *)0xB001 && got && got[0] == (void *)0xB001 && got[1] == (void *)0xB002 && *(i32 *)(dummy + PAWN_SPAWNER_SETS + 8) == 2,
+          "AddAnimSets calls %d, num %d", addsets_calls, addsets_n);
+    CHECK(pe_calls == 4, "the animation was not played after the lookup (%d)", pe_calls);
+    int fc = find_calls;
+    my_WorldPacket(ch, 1, 0x12, with_sets + 2, with_sets_n - 2); my_Tick(ctrl, 0.016f, 0);
+    CHECK(find_calls == fc && addsets_calls == 1 && pe_calls == 5, "a puppet that has sets looked them up again (%d calls)", find_calls - fc);
+    *(void ***)(dummy + PAWN_SPAWNER_SETS) = 0; *(i32 *)(dummy + PAWN_SPAWNER_SETS + 8) = 0; *(i32 *)(dummy + PAWN_SPAWNER_SETS + 12) = 0;
+    addsets_calls = 0;
 
     /* ---- the merge hands the animation sets of the dropped own copy to the puppet ---- */
     static void *sets[2] = {(void *)0xA1, (void *)0xA2};

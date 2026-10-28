@@ -43,6 +43,7 @@ static inline char *IB(void)
 #define DISABLE_MAILBOX   2u
 #define DISABLE_SHARED_CP 4u
 #define DISABLE_ANIM      8u
+#define DISABLE_SETS      16u            /* the handover of animation sets from the dropped copy (a twin for the lookup by path) */
 static inline volatile u32 *data_area(char *ib)
 {
     volatile u32 *d = (volatile u32 *)(ib + CAVE_RVA + DATA_OFFSET);
@@ -182,7 +183,7 @@ static void clear_seen(volatile u32 *d)
 
 struct fstr { unsigned short *data; i32 num; i32 max; };
 struct astate { char *actor; u32 lo, hi, pad; };
-struct aq { u32 valid; i32 sender; u32 flags; u32 f[5]; u32 pad[4]; char enemy[64]; char anim[64]; };
+struct aq { u32 valid; i32 sender; u32 flags; u32 f[5]; u32 pad[4]; char enemy[64]; char anim[64]; u32 nsets; u32 pad2[3]; char sets[4][80]; };   /* 0x200 bytes */
 
 static int same_name(const volatile char *a, const unsigned short *w, i32 wn);
 
@@ -192,16 +193,17 @@ static int same_name(const volatile char *a, const unsigned short *w, i32 wn);
 #define PAWN_SPAWNER_SETS  0x2d7c     /* AOLEnemyPawn::SpawnerAnimSets (TArray<UAnimSet*>: data +0, num +8, max +12) */
 #define VT_ADDANIMSETS     0x738      /* OLPawn::AddAnimSets(const TArray<UAnimSet*>&) */
 #define RVA_APPREALLOC     0x0beac0   /* void *appRealloc(void *old, u32 bytes, u32 align) */
-static void transfer_animsets(char *ib, char *from, char *to)
+#define RVA_GETFULLNAME    0x0194110  /* FString UObject::GetFullName(const UObject* StopOuter = NULL) const : rcx = object, rdx = FString* result, r8 = 0 ("Class Package.Name") */
+#define RVA_FINDOBJ        0x01ade40  /* UObject *StaticFindObject(UClass*, UObject* outer, const TCHAR* name, UBOOL exact) (ApplySpawn finds the enemy class with it) */
+#define RVA_CLASSCLASS     0x2f92ab8  /* UClass* of the class "Class" (the first argument ApplySpawn passes to StaticFindObject to find a UClass) */
+
+/* Give a puppet animation sets: they go into its own SpawnerAnimSets (so that a later rebuild of its sets keeps them) and are added at once. */
+static void install_sets(char *ib, char *to, void **sets, i32 n)
 {
-    if (!from || !to || from == to)
+    if (!to || n <= 0 || n > 64 || !sets)
         return;
-    char *src = from + PAWN_SPAWNER_SETS, *dst = to + PAWN_SPAWNER_SETS;
-    i32 n = *(i32 *)(src + 8);
-    void **sets = *(void ***)src;
-    if (n <= 0 || n > 64 || !sets)
-        return;
-    if (*(i32 *)(dst + 8) == 0) {                     /* the puppet keeps its own list too, so a later rebuild of its animation sets still includes them */
+    char *dst = to + PAWN_SPAWNER_SETS;
+    if (*(i32 *)(dst + 8) == 0) {
         void **buf = ((void **(*)(void *, u32, u32))(ib + RVA_APPREALLOC))(0, (u32)n * 8u, 8u);
         if (buf) {
             for (i32 i = 0; i < n; i++)
@@ -211,8 +213,18 @@ static void transfer_animsets(char *ib, char *from, char *to)
             *(i32 *)(dst + 12) = n;
         }
     }
+    struct { void **data; i32 num; i32 max; } tmp;     /* a TArray<UAnimSet*> for AddAnimSets */
+    tmp.data = sets; tmp.num = n; tmp.max = n;
     char *vt = *(char **)to;
-    ((void (*)(char *, void *))*(void **)(vt + VT_ADDANIMSETS))(to, src);
+    ((void (*)(char *, void *))*(void **)(vt + VT_ADDANIMSETS))(to, &tmp);
+}
+
+static void transfer_animsets(char *ib, char *from, char *to)
+{
+    if (!from || !to || from == to)
+        return;
+    char *src = from + PAWN_SPAWNER_SETS;
+    install_sets(ib, to, *(void ***)src, *(i32 *)(src + 8));
 }
 
 static i32 fstr_ascii(const struct fstr *s, char *dst, i32 max)
@@ -277,7 +289,7 @@ static void anim_edge(char *ib, volatile u32 *d, char *e)
     struct fstr en, an;
     ((void *(*)(void *, void *))(ib + RVA_GETNAME))(e, &en);
     ((void *(*)(void *, void *))(ib + RVA_NAME_TOSTRING))(bot + BOT_CURANIM, &an);
-    char buf[2 + 1 + 63 + 1 + 63 + 1 + 20];
+    char buf[2 + 1 + 63 + 1 + 63 + 1 + 20 + 1 + 4 * 80];
     i32 k = 0;
     buf[k++] = CH_WORLD;
     buf[k++] = WORLD_ENEMY_ANIM;
@@ -292,6 +304,31 @@ static void anim_edge(char *ib, volatile u32 *d, char *e)
         put_u32(buf + k, *(u32 *)(bot + BOT_CURANIM + 12 + 4 * j));
         k += 4;
     }
+    /* the paths of the animation sets this enemy was given, so that a puppet without a twin on its side can find them by name (not on a refresh) */
+    i32 ns_at = k++, ns = 0;
+    i32 cnt = refresh ? 0 : *(i32 *)(e + PAWN_SPAWNER_SETS + 8);
+    void **arr = *(void ***)(e + PAWN_SPAWNER_SETS);
+    for (i32 i = 0; arr && i < cnt && i < 4; i++) {
+        if (!arr[i])
+            continue;
+        struct fstr fs;
+        ((void *(*)(void *, void *, void *))(ib + RVA_GETFULLNAME))(arr[i], &fs, 0);
+        char full[96];
+        i32 L = fstr_ascii(&fs, full, 95), b = 0;
+        if (fs.data)
+            ((void (*)(void *))(ib + RVA_APPFREE))(fs.data);
+        while (b < L && full[b] != ' ')              /* "AnimSet Package.Name": drop the class */
+            b++;
+        b = b < L ? b + 1 : 0;
+        i32 pl = L - b;
+        if (pl <= 0 || pl > 79)
+            continue;
+        buf[k++] = (char)pl;
+        for (i32 c = 0; c < pl; c++)
+            buf[k++] = full[b + c];
+        ns++;
+    }
+    buf[ns_at] = (char)ns;
     if (en.data)
         ((void (*)(void *))(ib + RVA_APPFREE))(en.data);
     if (an.data)
@@ -327,7 +364,51 @@ static void enqueue_anim(volatile u32 *d, i32 sender, const u8 *data, i32 len)
     q->enemy[nl] = 0;
     for (i32 i = 0; i < al; i++) q->anim[i] = (char)data[2 + nl + i];
     q->anim[al] = 0;
+    q->nsets = 0;
+    i32 p = o + 21;                                  /* after the floats: [count][len][path]... (absent in an older packet) */
+    i32 cnt = p < len ? data[p++] : 0;
+    for (i32 s = 0; s < cnt && s < 4; s++) {
+        i32 pl = p < len ? data[p] : 0;
+        if (pl <= 0 || pl > 79 || p + 1 + pl > len)
+            break;
+        for (i32 c = 0; c < pl; c++) q->sets[s][c] = (char)data[p + 1 + c];
+        q->sets[s][pl] = 0;
+        p += 1 + pl;
+        q->nsets = (u32)(s + 1);
+    }
     q->valid = 1;
+}
+
+/* A puppet with no animation sets (its enemy has no twin on this client to take them from): find the sets by the paths the owner sent. */
+static void resolve_sets(char *ib, volatile u32 *d, char *dummy, volatile struct aq *q)
+{
+    void *cls = *(void **)(ib + RVA_CLASSCLASS);
+    if (!cls)
+        return;
+    volatile unsigned long long cw[4];                /* L"Engine.AnimSet" from immediates */
+    cw[0] = 0x00690067006E0045ull;
+    cw[1] = 0x0041002E0065006Eull;
+    cw[2] = 0x0053006D0069006Eull;
+    cw[3] = 0x0000000000740065ull;
+    void *(*find)(void *, void *, const unsigned short *, i32) = (void *(*)(void *, void *, const unsigned short *, i32))(ib + RVA_FINDOBJ);
+    void *aset = find(cls, 0, (const unsigned short *)(unsigned long long)cw, 0);
+    if (!aset)
+        return;
+    void *objs[4];
+    i32 cnt = 0;
+    for (u32 s = 0; s < q->nsets && s < 4; s++) {
+        unsigned short w[96];
+        i32 k = 0;
+        for (; k < 79 && q->sets[s][k]; k++)
+            w[k] = (unsigned char)q->sets[s][k];
+        w[k] = 0;
+        void *o = find(aset, 0, w, 0);
+        if (o)
+            objs[cnt++] = o;
+    }
+    install_sets(ib, dummy, objs, cnt);
+    if (cnt > 0)
+        bump(d, F_CNT_ANIM_RESOLVED);
 }
 
 /* Run the script function OLEnemyPawn.PlayFullBodyAnim on the puppet: it sets bIsAnimatingFullBody and LastPlayedAnim like the real enemy does. */
@@ -351,6 +432,8 @@ static void play_anim(char *ib, volatile u32 *d, char *pc, volatile struct aq *q
     }
     if ((q->flags & 2u) && (*(u32 *)(dummy + PAWN_FLAGS) & 0x10u))
         return;                                      /* a refresh while the puppet already animates: nothing to do (no restart) */
+    if (q->nsets && *(i32 *)(dummy + PAWN_SPAWNER_SETS + 8) == 0)
+        resolve_sets(ib, d, dummy, q);                  /* no twin handed its sets over: look them up by the owner's paths */
     unsigned short w[64];
     i32 k = 0;
     for (; k < 63 && q->anim[k]; k++)
@@ -419,7 +502,8 @@ void my_ApplySpawn(char *ch, i32 sender, void *name, void *cls, float x, float y
             bump(d0, F_CNT_PUPPET_DESTROYED);
             *(char *volatile *)((volatile char *)d0 + F_REBROADCAST_CTRL) = ctrl;   /* the sender may have missed our announcement while it loaded: announce again */
         } else {
-            transfer_animsets(ib, e, d);          /* the puppet gets the animation sets of the copy that goes */
+            if (!(d0[F_DISABLE / 4] & DISABLE_SETS))
+                transfer_animsets(ib, e, d);      /* the puppet gets the animation sets of the copy that goes */
             destroy_actor(ib, e);                 /* the sender's is the real one: drop our copy, keep the puppet */
             bump(d0, F_CNT_OWN_DESTROYED);
         }
@@ -449,7 +533,8 @@ void my_SendSpawn(char *ch, char *e)
             if (seen_dist2(first_seen(d0, d), se) >= same_place_sq() && dist2(d, x, y, z) >= same_place_sq())
                 continue;                    /* neither the places they first appeared nor where they are now */
             if (*(i32 *)(r + REMOTE_OWNER) < *(i32 *)(ib + RVA_LOCALPLAYERID)) {
-                transfer_animsets(ib, e, d);  /* the puppet gets the animation sets of the copy that goes */
+                if (!(d0[F_DISABLE / 4] & DISABLE_SETS))
+                    transfer_animsets(ib, e, d);   /* the puppet gets the animation sets of the copy that goes */
                 destroy_actor(ib, e);        /* a lower id owns this enemy: ours is the duplicate */
                 bump(d0, F_CNT_OWN_DESTROYED);
                 return;

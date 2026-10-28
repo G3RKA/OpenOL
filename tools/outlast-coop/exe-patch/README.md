@@ -75,10 +75,11 @@ and with the one-owner rule the second player only has the puppet. v7 adds (kill
   a long animation is repeated now and then for a client that joined or reconnected;
 - the receiving client queues it and its per-frame hook runs the same script function on the puppet through `ProcessEvent`; the game's own `LOC` code stops it when the flag drops;
 - the puppet is spawned from its class alone, so it lacks the animation sets the level hands to the real enemy at spawn (`AdditionalAnimSets`, where the `SE_AI_*` animations live; without them the log says
-  `PlayCustomAnim ..., Animation Not Found!!`). When our own copy is dropped in favour of the puppet it first hands its `SpawnerAnimSets` over (`AddAnimSets`).
+  `PlayCustomAnim ..., Animation Not Found!!`). Two ways give it the sets: when our own copy is dropped in favour of the puppet it first hands its `SpawnerAnimSets` over (`AddAnimSets`; kill switch bit 4 turns this off),
+  and the owner's packet also carries the full paths of its animation sets, which a puppet without sets looks up with `StaticFindObject` (counter `cnt_anim_resolved`), so an enemy that has no twin on the other client is covered too.
 
 Measured 2026-10-28 with `harness/probe_anim.py` on two real clients: owner and puppet animate together (12 of 12 seconds on two prison checkpoints); counters `cnt_anim_sent`, `cnt_anim_recv`, `cnt_anim_played`, `cnt_anim_dropped`.
-`hosttest.py` (no game) builds `olfix.c` against a fake image and engine mocks and checks the packet bytes, the queue, the FName strings and the call parameters. An enemy that exists on one client only has no copy to take the sets from.
+`hosttest.py` (no game) builds `olfix.c` against a fake image and engine mocks and checks the packet bytes, the queue, the FName strings and the call parameters. With the handover switched off (`probe_anim.py --disable 16`) the lookup by path alone gave 12 of 12 seconds on three checkpoints (4 lookups, no `Animation Not Found`).
 
 ## Command mailbox (patch v3)
 

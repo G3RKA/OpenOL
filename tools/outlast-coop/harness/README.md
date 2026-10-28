@@ -52,6 +52,7 @@ game's memory (read-only) instead of the overlay and the desktop:
 | `sweep.py <Group> [--map <persistent map>]` | Loads every checkpoint of a group on both clients, one after the other, and checks: the load applied, no hang (hero stream silent), no crash box, equal enemy counts, no enemy simulated twice. |
 | `probe_positions.py <checkpoint> [<checkpoint before>\|-] [<seconds between loads>]` | Enemy and puppet positions per second on both clients and the merge counters. |
 | `trigger_live.py` | Story triggers from a far-away player (the exe patch's distance gate): a scripted peer sends one trigger from an unknown position, from 50000 units away, from the players' position, and again with the gate switched off; run it on the upstream relay. |
+| `soak_enemy.py <checkpoint> <minutes>` | Soak with enemies: two clients, a checkpoint with enemies loaded through the mailbox, then every 30 s both processes alive, hero streams fresh, patch counters, memory, bad lines in the game logs (`Animation Not Found`, fatal errors). Prints a summary and exits 1 on any anomaly. |
 | `probe_anim.py <checkpoint>... [--disable 8\|16]` | Enemy animations, owner against puppet, per second (`Bot->bAnimating`, `bIsAnimatingFullBody`, the animation name, the puppet's animation sets) and the `cnt_anim_*` counters; `--disable 8` is the twin with the feature off. |
 
 ## Typical run

@@ -61,6 +61,12 @@ A checkpoint load (menu New Game, the F6 overlay, the mailbox) is announced to t
 load from its per-frame hook (a death restart on Insane difficulty is not shared, and a load that came from a partner is not sent back). Kill switch bit 2. When a client loaded after the other one had already announced its enemies,
 the owner announces them again (counter `cnt_rebroadcast`).
 
+A client that is still starting does not run the partner's load at once: a load that arrives while the map streams in takes the loader's cross-map path and the engine asserted (`Sequence != RootSequence`, found 2026-10-28 when one client loaded a checkpoint 1.2 s after the other had connected, game log of the crashed client). The follow now waits until the controller has ticked 600 frames and the hero exists (counter `cnt_follow_deferred`, override `follow_min_ticks`). `harness/follow_race.py` reproduces the start: the old build crashes the second client, the new one defers (755 frames in the run) and then loads.
+
+## Input checks (review 2026-10-28)
+
+An independent read of `olfix.c` found no read or write past a packet or a buffer. It did find four things, fixed: a NaN place counted as "the same place" (an enemy spawn packet with a NaN position could make the merge destroy the wrong copy; the comparison is now written so that NaN is "not the same"), a puppet that is already marked for deletion could be merged with, a world 0x11 packet with an empty checkpoint name was run, and a NaN or infinite rate, blend or time in an animation packet reached the script function (now dropped, counted in `cnt_anim_dropped`). `hosttest.py` has a check for each; they fail on the old code.
+
 ## First-seen places (patch v6)
 
 The merge compares the places where the two copies first appeared, not only where they stand now, so a copy that walked away before the other one appeared is still recognised as the same enemy.

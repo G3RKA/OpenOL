@@ -68,6 +68,7 @@ static inline void bump(volatile u32 *d, u32 field)
 #define RVA_GETGAMEINFO   0x0d214c0   /* AGameInfo* UWorld::GetGameInfo(UWorld*) */
 #define GAME_DIFFICULTY   0x49c       /* AOLGame::DifficultyMode (BYTE, 3 = Insane: a death restarts through StartNewGameAtCheckpoint) */
 #define PC_HEROPAWN       0xa5c       /* AOLPlayerController::HeroPawn */
+#define FOLLOW_MIN_TICKS  600         /* frames a client must have ticked before it runs a checkpoint load that a partner announced (about 10 s) */
 #define CH_WORLD          5
 #define WORLD_CHECKPOINT_LOAD 0x11    /* new: [nameLen][name ASCII][persistLen][persistent level ASCII] */
 #define RVA_APPLYSPAWN    0x171eb00   /* static void ApplySpawn(UEnemyChannel*, INT sender, FString& name, FString& class, FLOAT x,y,z, INT yaw, ...) */
@@ -103,6 +104,17 @@ static inline void destroy_actor(char *ib, char *actor)
 static inline int alive(const char *e)
 {
     return *(i32 *)(e + PAWN_HEALTH) > 0 && !(*(u8 *)(e + ACTOR_FLAGS_A) & 8) && !(*(u32 *)(e + ACTOR_FLAGS_B) & 0x800000u);
+}
+
+/* Only the deletion flags: a puppet's Health says nothing (alive() would drop every puppet that has none). */
+static inline int gone(const char *e)
+{
+    return (*(u8 *)(e + ACTOR_FLAGS_A) & 8) || (*(u32 *)(e + ACTOR_FLAGS_B) & 0x800000u);
+}
+
+static inline int finite_bits(u32 v)
+{
+    return ((v >> 23) & 0xffu) != 0xffu;
 }
 
 static inline float same_place_sq(void)
@@ -456,6 +468,12 @@ static void play_anim(char *ib, volatile u32 *d, char *pc, volatile struct aq *q
         bump(d, F_CNT_ANIM_DROPPED);
         return;
     }
+    for (i32 i = 0; i < 5; i++) {                    /* a NaN or infinite rate, blend or time from the wire goes nowhere near the animation code */
+        if (!finite_bits(q->f[i])) {
+            bump(d, F_CNT_ANIM_DROPPED);
+            return;
+        }
+    }
     u32 parm[8];                                     /* OLEnemyPawn.PlayFullBodyAnim(name, rate, blendIn, blendOut, bLooping, start, end) */
     parm[0] = an[0]; parm[1] = an[1];
     parm[2] = q->f[0]; parm[3] = q->f[1]; parm[4] = q->f[2];
@@ -494,8 +512,8 @@ void my_ApplySpawn(char *ch, i32 sender, void *name, void *cls, float x, float y
         char *e = arr[i];
         if (!e || e == d || !alive(e) || *(void **)(e + OBJ_CLASS) != *(void **)(d + OBJ_CLASS))
             continue;
-        if (seen_dist2(first_seen(d0, e), sd) >= same_place_sq() && dist2(e, sd->x, sd->y, sd->z) >= same_place_sq())
-            continue;                             /* neither where ours first appeared nor where it is now */
+        if (!(seen_dist2(first_seen(d0, e), sd) < same_place_sq()) && !(dist2(e, sd->x, sd->y, sd->z) < same_place_sq()))
+            continue;                             /* neither where ours first appeared nor where it is now (written so that a NaN place is "not the same") */
         if (sender > *(i32 *)(ib + RVA_LOCALPLAYERID)) {
             *(char **)(r + REMOTE_DUMMY) = 0;     /* ours is the real one: no puppet of the sender's copy */
             destroy_actor(ib, d);
@@ -528,10 +546,10 @@ void my_SendSpawn(char *ch, char *e)
         for (i32 i = 0; rem && i < n; i++) {
             char *r = rem + (long long)i * REMOTE_STRIDE;
             char *d = *(char **)(r + REMOTE_DUMMY);
-            if (!d || *(void **)(d + OBJ_CLASS) != *(void **)(e + OBJ_CLASS))
+            if (!d || gone(d) || *(void **)(d + OBJ_CLASS) != *(void **)(e + OBJ_CLASS))
                 continue;
-            if (seen_dist2(first_seen(d0, d), se) >= same_place_sq() && dist2(d, x, y, z) >= same_place_sq())
-                continue;                    /* neither the places they first appeared nor where they are now */
+            if (!(seen_dist2(first_seen(d0, d), se) < same_place_sq()) && !(dist2(d, x, y, z) < same_place_sq()))
+                continue;                    /* neither the places they first appeared nor where they are now (a NaN place is "not the same") */
             if (*(i32 *)(r + REMOTE_OWNER) < *(i32 *)(ib + RVA_LOCALPLAYERID)) {
                 if (!(d0[F_DISABLE / 4] & DISABLE_SETS))
                     transfer_animsets(ib, e, d);   /* the puppet gets the animation sets of the copy that goes */
@@ -635,7 +653,23 @@ i32 my_Tick(char *pc, float dt, i32 type)
             }
         }
     }
+    char *lc = *(char *volatile *)((volatile char *)d + F_LAST_CTRL);
+    if (pc && pc == lc) {                                                /* frames this controller has been seen ticking (the one the enemy hooks know) */
+        if (*(char *volatile *)((volatile char *)d + F_AGE_CTRL) != pc) {
+            *(char *volatile *)((volatile char *)d + F_AGE_CTRL) = pc;
+            d[F_CTRL_TICKS / 4] = 0;
+        } else if (d[F_CTRL_TICKS / 4] < 0x7fffffffu) {
+            d[F_CTRL_TICKS / 4]++;
+        }
+    }
     if (d[F_FOLLOW_PENDING / 4]) {                                       /* a partner loaded a checkpoint: do the same here */
+        u32 need = d[F_FOLLOW_MIN_TICKS / 4] ? d[F_FOLLOW_MIN_TICKS / 4] : FOLLOW_MIN_TICKS;
+        char *hero = (pc && pc == lc) ? *(char **)(pc + PC_HEROPAWN) : 0;
+        if (pc != lc || !hero || d[F_CTRL_TICKS / 4] < need) {
+            /* This client is still starting (a load that arrives now travels to the map while its levels are streaming in and the engine
+               asserts, seen in the game log 2026-10-28): keep the request and run it once the world has been ticking for a while. */
+            bump(d, F_CNT_FOLLOW_DEFERRED);
+        } else {
         d[F_FOLLOW_PENDING / 4] = 0;
         if (!(d[F_DISABLE / 4] & DISABLE_SHARED_CP)) {
             copy_cstr((char *)d + F_EXPECT_NAME, (const volatile char *)d + F_FOLLOW_NAME, 128);
@@ -643,6 +677,7 @@ i32 my_Tick(char *pc, float dt, i32 type)
             copy_cstr(ib + RVA_CPPERSIST, (const volatile char *)d + F_FOLLOW_PERSIST, 128);
             bump(d, F_CNT_FOLLOW_EXEC);
             ((void (*)(void))(ib + RVA_EXECCP))();
+        }
         }
     }
     u32 seq = d[F_CMD_SEQ / 4];
@@ -795,8 +830,8 @@ void my_WorldPacket(char *ch, i32 sender, u32 type, const u8 *data, i32 len)
     if (!data || len < 2 || (d[F_DISABLE / 4] & DISABLE_SHARED_CP))
         return;
     i32 n = data[0];
-    if (n == 0 || n > 127 || 1 + n + 1 > len)
-        return;
+    if (n == 0 || n > 127 || 1 + n + 1 > len || data[1] == 0)
+        return;                                   /* no empty name: ExecCP with an empty name is not a load */
     i32 pn = data[1 + n];
     if (pn > 127 || 1 + n + 1 + pn > len)
         return;

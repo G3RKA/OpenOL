@@ -47,6 +47,8 @@ static char *g_func = (char *)0x1234567;
 static char *mock_FindFunc(char *obj, unsigned long long fname) { (void)obj; return (unsigned)fname == hash_of("PlayFullBodyAnim") ? g_func : 0; }
 static u32 pe_parm[8]; static int pe_calls; static char *pe_obj, *pe_func;
 static void mock_ProcessEvent(char *obj, char *func, void *parms, void *res) { (void)res; pe_obj = obj; pe_func = func; memcpy(pe_parm, parms, 32); pe_calls++; }
+static int execcp_calls;
+static void mock_ExecCP(void) { execcp_calls++; }
 static i32 mock_Tick(char *pc, float dt, i32 t) { (void)pc; (void)dt; (void)t; return 1; }
 static int send_spawn_calls;
 static void mock_SendSpawn(char *ch, char *e) { (void)ch; (void)e; send_spawn_calls++; }
@@ -92,7 +94,7 @@ int main(void)
     tramp(RVA_SENDBINARY, mock_SendBinary); tramp(RVA_APPFREE, mock_AppFree); tramp(RVA_GETNAME, mock_GetName);
     tramp(RVA_NAME_TOSTRING, mock_ToString); tramp(RVA_NAME_CTOR, mock_NameCtor); tramp(RVA_FINDFUNC, mock_FindFunc);
     tramp(RVA_TICK, mock_Tick); tramp(RVA_DESTROYACTOR, mock_DestroyActor); tramp(RVA_APPREALLOC, mock_AppRealloc);
-    tramp(RVA_GETFULLNAME, mock_GetFullName); tramp(RVA_FINDOBJ, mock_FindObject);
+    tramp(RVA_EXECCP, mock_ExecCP); tramp(RVA_GETFULLNAME, mock_GetFullName); tramp(RVA_FINDOBJ, mock_FindObject);
     *(void **)(g_ib + RVA_CLASSCLASS) = (void *)0xC1A55;
     *(i32 *)(g_ib + RVA_SYNCENEMIES) = 1;
     *(i32 *)(g_ib + RVA_LOCALPLAYERID) = 2;
@@ -280,6 +282,57 @@ int main(void)
     my_WorldPacket(ch, 5, 1, trig, 8);
     CHECK(world_orig_calls == 6, "kill switch: forwarded %d", world_orig_calls);
     d[F_DISABLE / 4] = 0;
+
+    /* ---- hostile or broken input (review 2026-10-28) ---- */
+    /* a NaN place is never "the same place": the merge leaves both copies alone */
+    static char pawn2[0x3000];
+    *(char **)(pawn2 + OBJ_CLASS) = (char *)0x7000; *(i32 *)(pawn2 + PAWN_HEALTH) = 100;
+    *(u32 *)(pawn2 + ACTOR_LOC) = 0x7FC00000u;
+    destroyed = destroyed_n;
+    my_SendSpawn(ch, pawn2);
+    CHECK(destroyed_n == destroyed, "a NaN place merged two enemies (%d destroyed)", destroyed_n - destroyed);
+    /* a puppet that is already marked for deletion is not merged with */
+    static char pawn3[0x3000];
+    *(char **)(pawn3 + OBJ_CLASS) = (char *)0x7000; *(i32 *)(pawn3 + PAWN_HEALTH) = 100;
+    *(u8 *)(dummy + ACTOR_FLAGS_A) |= 8;
+    my_SendSpawn(ch, pawn3);
+    CHECK(destroyed_n == destroyed, "merged with a deleted puppet (%d destroyed)", destroyed_n - destroyed);
+    *(u8 *)(dummy + ACTOR_FLAGS_A) &= (u8)~8;
+    /* an animation packet with a NaN rate is dropped, a finite one plays */
+    unsigned char nanp[512]; memcpy(nanp, first, first_n);
+    nanp[34] = 0x00; nanp[35] = 0x00; nanp[36] = 0xC0; nanp[37] = 0x7F;
+    int pe0 = pe_calls; u32 dr0 = d[F_CNT_ANIM_DROPPED / 4];
+    *(u32 *)(dummy + PAWN_FLAGS) = 0;
+    my_WorldPacket(ch, 1, 0x12, nanp + 2, first_n - 2); my_Tick(ctrl, 0.016f, 0);
+    CHECK(pe_calls == pe0 && d[F_CNT_ANIM_DROPPED / 4] == dr0 + 1, "NaN rate: calls %d (was %d), dropped %u", pe_calls, pe0, d[F_CNT_ANIM_DROPPED / 4] - dr0);
+    my_WorldPacket(ch, 1, 0x12, first + 2, first_n - 2); my_Tick(ctrl, 0.016f, 0);
+    CHECK(pe_calls == pe0 + 1, "a finite packet after it did not play (%d)", pe_calls - pe0);
+    /* the shared checkpoint packet: an empty name is ignored, a real one is taken */
+    static const u8 emptyname[3] = {1, 0, 0};
+    static const u8 goodname[4] = {2, 'A', 'B', 0};
+    d[F_FOLLOW_PENDING / 4] = 0;
+    my_WorldPacket(ch, 1, 0x11, emptyname, 3);
+    CHECK(d[F_FOLLOW_PENDING / 4] == 0, "an empty checkpoint name was accepted");
+    my_WorldPacket(ch, 1, 0x11, goodname, 4);
+    CHECK(d[F_FOLLOW_PENDING / 4] == 1 && ((volatile char *)d)[F_FOLLOW_NAME] == 'A' && ((volatile char *)d)[F_FOLLOW_NAME + 2] == 0, "a good checkpoint name was not taken");
+    /* the follow waits until this client has been ticking for a while and has a hero (a load that arrives while the map streams in crashed the engine) */
+    d[F_FOLLOW_MIN_TICKS / 4] = 3; d[F_CTRL_TICKS / 4] = 0; *(char *volatile *)((volatile char *)d + F_AGE_CTRL) = 0;
+    u32 def0 = d[F_CNT_FOLLOW_DEFERRED / 4];
+    my_Tick(ctrl, 0.016f, 0); my_Tick(ctrl, 0.016f, 0);
+    CHECK(execcp_calls == 0 && d[F_FOLLOW_PENDING / 4] == 1 && d[F_CNT_FOLLOW_DEFERRED / 4] == def0 + 2, "early: ExecCP %d, deferred %u", execcp_calls, d[F_CNT_FOLLOW_DEFERRED / 4] - def0);
+    my_Tick((char *)0x9999, 0.016f, 0);
+    CHECK(execcp_calls == 0, "another controller ran the follow");
+    my_Tick(ctrl, 0.016f, 0); my_Tick(ctrl, 0.016f, 0);
+    CHECK(execcp_calls == 1 && d[F_FOLLOW_PENDING / 4] == 0, "late: ExecCP %d, pending %u", execcp_calls, d[F_FOLLOW_PENDING / 4]);
+    my_WorldPacket(ch, 1, 0x11, goodname, 4);
+    *(char **)(ctrl + PC_HEROPAWN) = 0;                                       /* no hero yet: still waiting */
+    my_Tick(ctrl, 0.016f, 0);
+    CHECK(execcp_calls == 1 && d[F_FOLLOW_PENDING / 4] == 1, "no hero: ExecCP %d", execcp_calls);
+    *(char **)(ctrl + PC_HEROPAWN) = hero;
+    my_Tick(ctrl, 0.016f, 0);
+    CHECK(execcp_calls == 2 && d[F_FOLLOW_PENDING / 4] == 0, "hero there: ExecCP %d", execcp_calls);
+    d[F_FOLLOW_MIN_TICKS / 4] = 0;
+    d[F_FOLLOW_PENDING / 4] = 0;
 
     printf("%s\n", fails ? "HOSTTEST FAIL" : "HOSTTEST OK");
     return fails ? 1 : 0;

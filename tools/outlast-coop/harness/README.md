@@ -56,6 +56,17 @@ game's memory (read-only) instead of the overlay and the desktop:
 | `soak_enemy.py <checkpoint> <minutes>` | Soak with enemies: two clients, a checkpoint with enemies loaded through the mailbox, then every 30 s both processes alive, hero streams fresh, patch counters, memory, bad lines in the game logs (`Animation Not Found`, fatal errors). Prints a summary and exits 1 on any anomaly. |
 | `probe_anim.py <checkpoint>... [--disable 8\|16]` | Enemy animations, owner against puppet, per second (`Bot->bAnimating`, `bIsAnimatingFullBody`, the animation name, the puppet's animation sets) and the `cnt_anim_*` counters; `--disable 8` is the twin with the feature off. |
 
+## Scripts for OpenOL 2.2.0 (test copy of the 2.2.0 release, standalone relay, no proxy: the traffic is encrypted, so everything is judged from the game logs and the process state)
+
+| File | What it does |
+|---|---|
+| `v22.py up <n> [<map>]` / `down` / `log <idx> [<regex>]` | The relay (port 7777, loopback) and n clients on a map, registered in `v22_reg.json`; stops only what it started; prints client log lines. Set `OL_GAME_DIR22`, `OL_LOG_DIR22` and `OL_RELAY22`. |
+| `v22_soak.py <minutes>` | Two clients idle for a while: processes alive, no error lines, memory. |
+| `v22_scenarios.py` | No mouse and no keyboard: one AI owner, the owner leaves and the other takes over, the returning player, a relay restart. |
+| `v22_churn.py [<rounds>]` | A player leaves and joins again N times while the other stays. |
+| `v22_cp.py <idx> <checkpoint>`, `v22_sweep.py <checkpoint>...` | Load checkpoints through the overlay (the key is `~`; mouse and keyboard) and read from the logs of both clients that the other one followed, which client spawned the enemies, and the animation lines. |
+| `v22_shot.py <idx> <out.png>` | Picture of one client window only, never the desktop. |
+
 ## Typical run
 
 ```

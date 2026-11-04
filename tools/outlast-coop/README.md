@@ -1,5 +1,9 @@
 # Outlast co-op on OpenOL 2.1.0: patches, play kit and tests
 
+> **Status: archived, for OpenOL 2.1.0 only.** OpenOL 2.2.0 (released 2026-11-02) has enemy ownership, checkpoint sharing, enemy animations and trigger arbitration in the game itself. To play, use the
+> [OpenOL 2.2.0 release](https://github.com/ShyKiss/OpenOL/releases/tag/2.2.0) with [OpenOL-Relay](https://github.com/ShyKiss/OpenOL-Relay). What is below still applies to 2.1.0 and stays as a record and as a test toolbox
+> (`harness/` also has scripts for 2.2.0 that need no mouse or keyboard). Last state of this repository: tag `legacy-2.1.0-final`.
+
 Own development on top of [OpenOL](https://github.com/ShyKiss/OpenOL) (a modified Outlast client with a multiplayer beta). Nothing here is
 offered to or maintained with the OpenOL authors. Everything in `tools/outlast-coop/` is MIT licensed (see `LICENSE`); the rest of this repository
 is the upstream code under its own terms (the upstream repository has no license file). This folder contains no Outlast or OpenOL files, only
